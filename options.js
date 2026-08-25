@@ -67,11 +67,17 @@ async function load() {
 function applyFontMode(mode) {
   const inheriting = mode === "platform";
   $("fontInherit").checked = inheriting;
-  // The custom fields are dead while inheriting.
-  $("fontFamily").disabled = inheriting;
+  // Size is fully inherited, so that field goes dead. The font field stays
+  // live either way: while inheriting it supplies the glyphs the site's own
+  // caption font lacks (Chinese text on a Latin-only Western font), appended
+  // after the site's stack rather than replacing it.
   $("fontSize").disabled = inheriting;
-  $("rowFontFamily").classList.toggle("is-disabled", inheriting);
   $("rowFontSize").classList.toggle("is-disabled", inheriting);
+  $("fontFamily").disabled = false;
+  $("rowFontFamily").classList.remove("is-disabled");
+  $("fontFamilyHint").textContent = inheriting
+    ? "网站字体缺少的字形用它补上——西方网站的字幕字体没有中文，译文会用这里填的字体。留空则用系统默认中文字体。"
+    : "填任意 CSS font-family 值。留空则使用系统默认。";
   updateStylePreview();
 }
 
@@ -99,6 +105,40 @@ const STREAMING_MATCHES = [
 ];
 
 let nativeFontReading = null; // last successful read, for the preview
+
+// Mirrors withFallbackFont() in content.js. A CSS generic family matches every
+// character, so a font listed after one never gets used — the extra font must
+// be spliced in ahead of the generic.
+const GENERIC_FAMILIES = new Set([
+  "serif",
+  "sans-serif",
+  "monospace",
+  "cursive",
+  "fantasy",
+  "system-ui",
+  "ui-serif",
+  "ui-sans-serif",
+  "ui-monospace",
+  "ui-rounded",
+  "math",
+  "emoji",
+  "fangsong",
+]);
+
+function withFallbackFont(stack, extra) {
+  if (!extra) return stack;
+  if (!stack) return extra;
+  const parts = stack
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const at = parts.findIndex((x) =>
+    GENERIC_FAMILIES.has(x.toLowerCase().replace(/^["']|["']$/g, ""))
+  );
+  if (at === -1) parts.push(extra);
+  else parts.splice(at, 0, extra);
+  return parts.join(", ");
+}
 
 function showNativeFont(text, ok = false) {
   const el = $("nativeFontInfo");
@@ -173,9 +213,13 @@ function updateStylePreview() {
   const inheriting = $("fontInherit").checked;
   // While inheriting, preview what the open player actually reported.
   const useNative = inheriting && nativeFontReading;
+  const custom = $("fontFamily").value.trim();
+  // Same stack the overlay builds — see withFallbackFont() in content.js: the
+  // configured font goes *before* the site stack's generic family, since a
+  // generic matches every character and would swallow the fallback.
   const fam = useNative
-    ? nativeFontReading.fontFamily
-    : $("fontFamily").value.trim();
+    ? withFallbackFont(nativeFontReading.fontFamily, custom)
+    : custom;
   const on = $("textBgEnabled").checked;
   const pct = on ? Math.max(0, Math.min(90, Number($("textBgOpacity").value) || 0)) : 0;
   const bg = `rgba(0, 0, 0, ${pct / 100})`;

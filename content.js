@@ -369,11 +369,23 @@
     if (settings.fontSource === "platform") {
       const nat = readNativeFont();
       if (nat) {
-        famOut = nat.fontFamily;
+        // Append the configured font *after* the site's stack rather than
+        // replacing it. CSS font fallback is per-glyph, and a Western site's
+        // caption font ("Netflix Sans", Roboto, …) carries no CJK glyphs — so
+        // translated Chinese text skips the whole inherited stack and lands on
+        // the browser's generic default. Appending puts the user's font in
+        // that slot, while Latin text (the original-text row) still renders in
+        // the site's own face. One stack does the right thing for both rows.
+        famOut = withFallbackFont(nat.fontFamily, fam);
         sizeOut = nat.fontSize;
+      } else if (!missingNativeFontLogged) {
+        missingNativeFontLogged = true;
+        log(
+          "fontSource=platform, but no native cue font could be measured yet — " +
+            "falling back to the custom font. Is the platform's own subtitle " +
+            "track switched on?"
+        );
       }
-      // No cue has ever been measured (platform captions off, or cues that
-      // never reach the DOM) — fall through to the configured values.
     }
     tEl.style.fontFamily = famOut;
     tEl.style.fontSize = sizeOut > 0 ? `${sizeOut}px` : "";
@@ -536,6 +548,7 @@
   // platform's caption-size preference and its own player-size scaling for
   // free, so no 1080p-relative scaling is applied on top.
   let nativeFont = null; // last good read: { fontFamily, fontSize }
+  let missingNativeFontLogged = false;
 
   // The platform sets the cue font on the innermost span, not the container
   // the selectors match, so descend to the deepest node holding real text.
@@ -557,6 +570,41 @@
     return best;
   }
 
+  // CSS generic families (sans-serif, serif, …) match *every* character, so a
+  // font listed after one is unreachable. Site caption stacks almost always
+  // end in a generic, which means appending at the end silently does nothing —
+  // the extra font has to be spliced in ahead of the generic.
+  const GENERIC_FAMILIES = new Set([
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+    "math",
+    "emoji",
+    "fangsong",
+  ]);
+
+  function withFallbackFont(stack, extra) {
+    if (!extra) return stack;
+    if (!stack) return extra;
+    const parts = stack
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    const at = parts.findIndex((x) =>
+      GENERIC_FAMILIES.has(x.toLowerCase().replace(/^["']|["']$/g, ""))
+    );
+    if (at === -1) parts.push(extra);
+    else parts.splice(at, 0, extra);
+    return parts.join(", ");
+  }
+
   function readNativeFont() {
     for (const container of nativeCueElements()) {
       const el = deepestTextBearer(container);
@@ -564,7 +612,16 @@
       const cs = getComputedStyle(el);
       const size = parseFloat(cs.fontSize || "0");
       if (!(size > 0)) continue;
-      nativeFont = { fontFamily: cs.fontFamily || "", fontSize: size };
+      const next = { fontFamily: cs.fontFamily || "", fontSize: size };
+      if (
+        !nativeFont ||
+        nativeFont.fontFamily !== next.fontFamily ||
+        nativeFont.fontSize !== next.fontSize
+      ) {
+        log(`native font measured: ${next.fontFamily} @ ${next.fontSize}px`);
+      }
+      nativeFont = next;
+      missingNativeFontLogged = false;
       return nativeFont;
     }
     // Between cues the container is empty and there is nothing to measure.
@@ -1198,6 +1255,13 @@
       // DOM is authoritative for what's on screen right now; cueLibrary only
       // pre-warms the text cache in the background.
       const text = extractSubtitle();
+      // Sample the platform's font every tick. renderOverlay() runs only when
+      // a cue or a setting changes, so sampling only from there means a single
+      // unmeasurable moment (empty container, player re-creating its nodes)
+      // leaves us silently on the fallback font until the next cue change.
+      // nativeCueElements() is memoized, so this shares the DOM walk that
+      // extractSubtitle() just did and costs nothing extra.
+      if (settings?.fontSource === "platform") readNativeFont();
       handleCueChange(text);
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.

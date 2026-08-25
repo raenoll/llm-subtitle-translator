@@ -201,7 +201,10 @@
             <strong>开启</strong>：沿用当前流媒体网站正在渲染的字幕字体与字号，自动继承你在
             Netflix / YouTube 等平台里设的字幕大小，并随播放器尺寸变化。读不到时
             （平台字幕关闭、或字幕烧录在画面里）回退到下面的自定义设置。<br />
-            <strong>关闭</strong>：改用下面自定义的字体与字号。
+            <strong>关闭</strong>：改用下面自定义的字体与字号。<br />
+            西方网站的字幕字体（Netflix Sans、Roboto 等）不含中日韩字形，
+            所以开启后<strong>字号照常继承，但译文的字体仍需要下面填一个中文字体</strong>——
+            浏览器会按字形逐个回退：英文原文用网站字体，中文译文用你填的字体。
           </small>
         </div>
         <div class="row" id="rowFontFamily">
@@ -211,7 +214,7 @@
             type="text"
             placeholder="如: PingFang SC, Helvetica, sans-serif（留空使用默认）"
           />
-          <small class="hint">填任意 CSS font-family 值。留空则使用系统默认。</small>
+          <small class="hint" id="fontFamilyHint">填任意 CSS font-family 值。留空则使用系统默认。</small>
         </div>
         <div class="row" id="rowFontSize">
           <label>字号 (px)</label>
