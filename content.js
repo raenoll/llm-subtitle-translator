@@ -1692,10 +1692,42 @@
     return false;
   });
 
-  let lastHref = location.href;
+  // Which VIDEO the URL refers to — deliberately not the whole href. Players
+  // rewrite their URL during playback (tracking refs, autoplay flags, resume
+  // positions); treating that as a new video wipes the pre-translated cue
+  // library, and the subtitle file is not fetched again because the player
+  // already has it. The library then stays empty for the rest of the episode
+  // and every line falls back to slow live translation.
+  const TITLE_ID_PARAMS = [
+    "v", // YouTube
+    "gti", // Prime Video
+    "asin",
+    "titleId",
+    "contentId",
+    "episodeId",
+  ];
+
+  function videoIdentity() {
+    let search = "";
+    try {
+      const params = new URLSearchParams(location.search);
+      search = TITLE_ID_PARAMS.map((k) => params.get(k))
+        .filter(Boolean)
+        .join(",");
+    } catch (_) {}
+    // Amazon appends tracking refs as a PATH segment (…/detail/B0ABC/ref=atv_dp),
+    // so query-param filtering alone is not enough.
+    const path = location.pathname
+      .replace(/\/ref=[^/]*/gi, "")
+      .replace(/\/+$/, "");
+    return `${path}${search ? `?${search}` : ""}`;
+  }
+
+  let lastVideoId = videoIdentity();
   setInterval(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
+    const id = videoIdentity();
+    if (id !== lastVideoId) {
+      lastVideoId = id;
       currentOriginal = "";
       currentTranslated = "";
       lastLoggedText = null;
@@ -1708,7 +1740,7 @@
       kanaEvidence = { at: -1, value: false };
       console.log(
         DEBUG_PREFIX,
-        `navigation detected (${location.pathname}); re-evaluating`
+        `new video detected (${id}); cue library cleared, re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
       // and back should toggle the observer on/off accordingly.
