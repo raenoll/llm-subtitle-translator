@@ -306,6 +306,32 @@ select:disabled {
 }
 .native-font.ok { color: var(--fg); border-style: solid; }
 
+/* Diagnostics panel */
+.diag-verdict {
+  margin: 10px 0 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.diag-verdict.bad { border-color: var(--err); color: var(--err); }
+.diag-verdict.good { border-color: var(--ok); color: var(--ok); }
+.diag-output {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
 /* Range slider + its live value readout */
 input[type="range"] {
   flex: 1;

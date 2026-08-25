@@ -157,6 +157,102 @@ async function refreshNativeFont() {
 }
 
 $("nativeFontRefresh").addEventListener("click", refreshNativeFont);
+
+// --- Diagnostics ----------------------------------------------------------
+// Turns a state snapshot into a plain-language verdict, so the three failure
+// modes can be told apart without reading a console.
+function verdictFor(d) {
+  const notes = [];
+  const visibleCues = (d.nativeCues || []).filter(
+    (c) => c.text && parseFloat(c.opacity || "1") > 0
+  );
+  if (visibleCues.length) {
+    const shadow = visibleCues.filter((c) => c.inShadow && !c.hideRuleInRoot);
+    notes.push(
+      `❌ 原生字幕没有被隐藏（${visibleCues.length} 个元素仍可见）——你看到的原文` +
+        `来自播放器本身，不是本扩展绘制的。` +
+        (shadow.length
+          ? `其中 ${shadow.length} 个在 shadow root 里且该 root 没有隐藏规则。`
+          : "")
+    );
+  }
+  if (d.duplicated) {
+    notes.push(
+      "❌ 译文与原文完全相同——是本扩展的覆盖层在绘制原文。" +
+        "通常意味着模型把原文原样返回，或该条被判定为「不需要翻译」。"
+    );
+  }
+  if ((d.skipLanguages || []).includes(d.sessionLanguage)) {
+    notes.push(
+      `❌ 当前字幕语种「${d.sessionLanguage}」在「不翻译的语言」列表里——` +
+        `这些字幕会被刻意跳过并直接显示原文。若非本意，请把它移出该列表。`
+    );
+  }
+  if (!d.playerPage) {
+    notes.push("⚠️ 当前 URL 未被识别为播放页，扩展在此页面不会接管字幕。");
+  }
+  if (d.currentOriginal && !d.currentTranslated && !d.duplicated) {
+    notes.push("⚠️ 这一条有原文但没有译文——翻译尚未返回或已失败。");
+  }
+  if (!notes.length) {
+    notes.push("✅ 未发现上述任何一类问题：原生字幕已隐藏，译文与原文不同。");
+  }
+  return notes.join("\n\n");
+}
+
+let lastDiag = null;
+
+async function runDiagnostics() {
+  const verdictEl = $("diagVerdict");
+  const outEl = $("diagOutput");
+  verdictEl.hidden = false;
+  outEl.hidden = false;
+  verdictEl.className = "diag-verdict";
+  verdictEl.textContent = "诊断中…";
+  outEl.textContent = "";
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: STREAMING_MATCHES });
+  } catch (err) {
+    verdictEl.textContent = `无法查询标签页：${err.message}`;
+    return;
+  }
+  if (!tabs.length) {
+    verdictEl.textContent = "未检测到已打开的流媒体页面。请先打开播放页再运行诊断。";
+    return;
+  }
+  const tab = tabs.find((t) => t.active) || tabs[0];
+  const resp = await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tab.id, { type: "getDiagnostics" }, (r) => {
+        void chrome.runtime.lastError;
+        resolve(r);
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+  if (!resp) {
+    verdictEl.textContent =
+      "播放页没有响应。请刷新该标签页后重试（扩展更新后需要重新加载页面）。";
+    return;
+  }
+  lastDiag = resp;
+  const verdict = verdictFor(resp);
+  verdictEl.textContent = verdict;
+  verdictEl.classList.add(verdict.startsWith("✅") ? "good" : "bad");
+  outEl.textContent = JSON.stringify(resp, null, 2);
+}
+
+$("diagRun").addEventListener("click", runDiagnostics);
+$("diagCopy").addEventListener("click", async () => {
+  if (!lastDiag) return;
+  await navigator.clipboard.writeText(
+    verdictFor(lastDiag) + "\n\n" + JSON.stringify(lastDiag, null, 2)
+  );
+  toast("已复制");
+});
 // Poll while the page is actually being looked at.
 setInterval(() => {
   if (!document.hidden) refreshNativeFont();

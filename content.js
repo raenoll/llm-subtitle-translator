@@ -1555,6 +1555,51 @@
   // Content scripts run in every frame (all_frames), and Chrome keeps only
   // the first response. Frames with no player have nothing useful to say, so
   // they stay silent and let the frame that actually holds the video answer.
+  // Full state snapshot for the options page's diagnostics panel, so the
+  // common failure modes can be told apart without opening DevTools.
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== "getDiagnostics") return false;
+    const videos = getVideos();
+    if (!nativeCueElements().length && !videos.length) return false;
+    const cues = nativeCueElements().map((el) => {
+      const cs = getComputedStyle(el);
+      const root = el.getRootNode?.();
+      const inShadow = !!root && root !== document && !!root.host;
+      return {
+        cls: String(el.className || el.tagName).slice(0, 60),
+        text: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40),
+        opacity: cs.opacity,
+        inShadow,
+        hideRuleInRoot: !!findHideStyle(inShadow ? root : document, "llm-subtitle-hide-native"),
+      };
+    });
+    const ov = document.getElementById("llm-subtitle-overlay");
+    sendResponse({
+      host: location.hostname,
+      platform: platform.name,
+      playerPage: isPlayerPage(),
+      sessionLanguage,
+      trackHasKana: trackHasKana(),
+      skipLanguages: settings?.skipLanguages || [],
+      targetLanguage: settings?.targetLanguage || "",
+      showOriginal: !!settings?.showOriginal,
+      cueLibrarySize: cueLibrary.size,
+      skipMarked: skipMarkedKeys.size,
+      nativeCues: cues,
+      overlay: ov
+        ? {
+            display: getComputedStyle(ov).display,
+            translated: (ov.querySelector(".llm-subtitle-translated")?.textContent || "").slice(0, 40),
+            original: (ov.querySelector(".llm-subtitle-original")?.textContent || "").slice(0, 40),
+          }
+        : null,
+      currentOriginal: (currentOriginal || "").slice(0, 40),
+      currentTranslated: (currentTranslated || "").slice(0, 40),
+      duplicated: !!currentTranslated && currentTranslated === currentOriginal,
+    });
+    return false;
+  });
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type !== "getNativeFont") return false;
     const cueEls = nativeCueElements();
