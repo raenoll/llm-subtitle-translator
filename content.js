@@ -362,6 +362,10 @@
     const isSkipping =
       currentOriginal && shouldSkipTranslation(currentOriginal);
     if (isSkipping) {
+      log(
+        `standing down: cue detected as ${detectLang(currentOriginal)}, ` +
+          `which is in the skip list — showing the native subtitle instead`
+      );
       if (overlay) overlay.style.display = "none";
       hideNativeSubtitles(false);
       return;
@@ -450,7 +454,10 @@
     const styleId = "llm-subtitle-hide-native";
     let el = document.getElementById(styleId);
     if (!on) {
-      if (el) el.remove();
+      if (el) {
+        el.remove();
+        log("native subtitles UN-HIDDEN — raw source is now visible");
+      }
       return;
     }
     if (el) return;
@@ -463,6 +470,7 @@
       ? `${selectors} { opacity: 0 !important; }`
       : "";
     document.documentElement.appendChild(el);
+    log("native subtitles hidden");
   }
 
   // -------------- DOM helpers --------------
@@ -867,11 +875,19 @@
     currentTranslated = "";
     renderOverlay();
 
-    const now = Date.now();
-    if (now - lastTranslationAt < MIN_INTERVAL_MS) {
-      await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+    // MIN_INTERVAL_MS paces calls to the translation API — so only pay it when
+    // a call is actually going to happen. A cache or in-flight hit needs no
+    // network at all, and in fast dialogue this delay alone can outlast the
+    // cue: the line ends before the translation lands, the strict-sync check
+    // below discards it, and that cue never shows a translation at all.
+    const key = normalize(text);
+    if (!cache.has(key) && !pending.has(key)) {
+      const now = Date.now();
+      if (now - lastTranslationAt < MIN_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+      }
+      lastTranslationAt = Date.now();
     }
-    lastTranslationAt = Date.now();
 
     const captured = text;
     const translation = await translateText(text);
@@ -1302,6 +1318,20 @@
       // extractSubtitle() just did and costs nothing extra.
       if (settings?.fontSizeSource === "platform") readNativeFont();
       handleCueChange(text);
+      // Re-assert the native-subtitle hide on every tick. renderOverlay() is
+      // the only other place that sets it, and it runs just on cue/settings
+      // changes — so anything that removes the style (a skip cue, an
+      // applySettings() pass while the URL is momentarily not recognised as a
+      // player page, the player rebuilding its subtitle DOM) leaves the raw
+      // source line on screen until the NEXT cue arrives. That is exactly the
+      // "one untranslated line, then back to normal" shape. Re-asserting here
+      // bounds the exposure to a single 200ms tick.
+      if (
+        settings?.enabled &&
+        !(currentOriginal && shouldSkipTranslation(currentOriginal))
+      ) {
+        hideNativeSubtitles(true);
+      }
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
       positionOverlayToVideo();

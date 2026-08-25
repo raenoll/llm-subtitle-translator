@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LLM Subtitle Translator",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "用 Gemini / OpenAI / Claude 实时翻译 Netflix、Disney+、YouTube、Prime Video 等流媒体的内置字幕。",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
