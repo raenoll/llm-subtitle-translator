@@ -157,6 +157,139 @@ async function refreshNativeFont() {
 }
 
 $("nativeFontRefresh").addEventListener("click", refreshNativeFont);
+
+// --- Log / diagnostics panel ---------------------------------------------
+// Reads the content script's in-memory log and timing stats, so the state of
+// a playing tab is inspectable from here rather than from DevTools.
+
+function summarize(d) {
+  const lines = [];
+  const live = d.servedLive || 0;
+  const timeline = d.servedByTimeline || 0;
+  const total = live + timeline;
+
+  if (!total && !d.capturedCues) {
+    // Nothing has played yet — say so rather than blaming the capture.
+    lines.push("ℹ️ 还没有显示过字幕。请先播放一段有字幕的内容，再回来刷新。");
+  } else if (!d.capturedCues) {
+    lines.push(
+      "❌ 预翻译库是空的——一条字幕都没抓到。每句都得等台词出现后才现场翻译，" +
+        "所以长句会迟到、短句会整句消失。"
+    );
+  } else if (total && live > timeline) {
+    lines.push(
+      `⚠️ 抓到了 ${d.capturedCues} 条字幕（已翻译 ${d.preTranslated} 条），` +
+        `但显示仍以现场翻译为主（时间轴 ${timeline} 句 / 现场 ${live} 句）。` +
+        (d.timelineOffset === null
+          ? "时间轴基准尚未校准，所以按时间取译文一直落空。"
+          : `时间轴偏移已校准为 ${d.timelineOffset.toFixed(2)}s。`)
+    );
+  } else if (total) {
+    lines.push(
+      `✅ 预翻译在驱动显示：时间轴 ${timeline} 句 / 现场 ${live} 句，` +
+        `已抓到 ${d.capturedCues} 条、翻译好 ${d.preTranslated} 条。` +
+        (d.timelineOffset !== null
+          ? `时间轴偏移 ${d.timelineOffset.toFixed(2)}s。`
+          : "")
+    );
+  }
+
+  if (!d.enabled) lines.push("⚠️ 扩展当前是关闭状态。");
+  if (!d.playerPage) lines.push("⚠️ 当前 URL 未被识别为播放页。");
+  if (d.sessionLanguage && (d.skipLanguages || []).includes(d.sessionLanguage)) {
+    lines.push(
+      `⚠️ 当前字幕语种「${d.sessionLanguage}」在「不翻译的语言」列表里，会被刻意跳过。`
+    );
+  }
+  lines.push(
+    `平台 ${d.platform} · 字幕语种 ${d.sessionLanguage || "未确定"} · ` +
+      `目标 ${d.targetLanguage}`
+  );
+  return lines.join("\n");
+}
+
+function formatLogs(logs) {
+  if (!logs || !logs.length) return "（暂无日志）";
+  return logs
+    .map((e) => {
+      const d = new Date(e.t);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      const tag =
+        e.level === "error" ? "✖" : e.level === "warn" ? "▲" : e.level === "debug" ? "·" : " ";
+      return `${hh}:${mm}:${ss} ${tag} ${e.msg}`;
+    })
+    .join("\n");
+}
+
+let lastLogs = null;
+
+async function refreshLogs() {
+  const sum = $("logSummary");
+  const out = $("logOutput");
+  sum.hidden = false;
+  out.hidden = false;
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: STREAMING_MATCHES });
+  } catch (err) {
+    sum.textContent = `无法查询标签页：${err.message}`;
+    return;
+  }
+  if (!tabs.length) {
+    sum.className = "diag-verdict";
+    sum.textContent = "未检测到已打开的流媒体页面。请先打开播放页。";
+    out.textContent = "";
+    return;
+  }
+  const tab = tabs.find((t) => t.active) || tabs[0];
+  const resp = await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tab.id, { type: "getLogs" }, (r) => {
+        void chrome.runtime.lastError;
+        resolve(r);
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+  if (!resp) {
+    sum.className = "diag-verdict";
+    sum.textContent = "播放页没有响应。扩展更新后需要重新加载该标签页。";
+    out.textContent = "";
+    return;
+  }
+  lastLogs = resp;
+  const text = summarize(resp);
+  sum.className =
+    "diag-verdict " + (text.startsWith("✅") ? "good" : text.startsWith("❌") ? "bad" : "");
+  sum.textContent = text;
+  const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 20;
+  out.textContent = formatLogs(resp.logs);
+  if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+$("logRefresh").addEventListener("click", refreshLogs);
+let logTimer = null;
+$("logAuto").addEventListener("change", (e) => {
+  clearInterval(logTimer);
+  logTimer = null;
+  if (e.target.checked) {
+    refreshLogs();
+    logTimer = setInterval(() => {
+      if (!document.hidden) refreshLogs();
+    }, 2000);
+  }
+});
+$("logCopy").addEventListener("click", async () => {
+  if (!lastLogs) return;
+  await navigator.clipboard.writeText(
+    summarize(lastLogs) + "\n\n" + formatLogs(lastLogs.logs)
+  );
+  toast("已复制");
+});
 // Poll while the page is actually being looked at.
 setInterval(() => {
   if (!document.hidden) refreshNativeFont();

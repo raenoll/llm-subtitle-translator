@@ -306,6 +306,42 @@ select:disabled {
 }
 .native-font.ok { color: var(--fg); border-style: solid; }
 
+/* Log / diagnostics panel */
+.auto-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.auto-wrap input { margin: 0; }
+.diag-verdict {
+  margin: 10px 0 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.diag-verdict.bad { border-color: var(--err); }
+.diag-verdict.good { border-color: var(--ok); }
+.diag-output {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 340px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Range slider + its live value readout */
 input[type="range"] {
   flex: 1;

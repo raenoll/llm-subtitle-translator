@@ -15,6 +15,43 @@
   const HOST = location.hostname;
   const DEBUG_PREFIX = "[subtitle-translator]";
 
+  // Recent log lines, kept in memory so the extension's own settings page can
+  // show them. Nobody should have to open DevTools to see what went wrong.
+  const LOG_BUFFER_MAX = 300;
+  const logBuffer = [];
+
+  function record(level, args) {
+    const msg = args
+      .map((a) => {
+        if (typeof a === "string") return a;
+        try {
+          return JSON.stringify(a);
+        } catch (_) {
+          return String(a);
+        }
+      })
+      .join(" ");
+    logBuffer.push({ t: Date.now(), level, msg });
+    if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+  }
+
+  // NOTE: these call console.* through globalThis on purpose. Writing
+  // `console.log(DEBUG_PREFIX, …)` here makes the body look exactly like the
+  // call sites, and a bulk rewrite of those call sites then turns these into
+  // infinite recursion.
+  function info(...args) {
+    record("info", args);
+    globalThis.console.log(DEBUG_PREFIX, ...args);
+  }
+  function warn(...args) {
+    record("warn", args);
+    globalThis.console.warn(DEBUG_PREFIX, ...args);
+  }
+  function err(...args) {
+    record("error", args);
+    globalThis.console.error(DEBUG_PREFIX, ...args);
+  }
+
   const PLATFORMS = [
     {
       match: /(^|\.)netflix\.com$/,
@@ -114,8 +151,8 @@
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
   const BUILD = "2026-04-26.2-youtube-pretranslate";
-  console.log(
-    `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
+  info(
+    `content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
   );
 
@@ -129,7 +166,7 @@
       s.onload = () => s.remove();
       (document.head || document.documentElement).appendChild(s);
     } catch (e) {
-      console.warn(DEBUG_PREFIX, "failed to inject capture script:", e);
+      warn("failed to inject capture script:", e);
     }
   })();
 
@@ -159,7 +196,10 @@
   let lastCueCaptureAt = 0;
 
   function log(...args) {
-    if (settings?.debug) console.log(DEBUG_PREFIX, ...args);
+    // Always recorded for the in-extension panel; only echoed to the console
+    // when the debug setting is on.
+    record("debug", args);
+    if (settings?.debug) globalThis.console.log(DEBUG_PREFIX, ...args);
   }
 
   // Coarse language detection by script range. CJK-only text (no hiragana /
@@ -174,7 +214,7 @@
   function setSessionLanguage(lang) {
     if (lang && sessionLanguage !== lang) {
       sessionLanguage = lang;
-      console.log(DEBUG_PREFIX, "session language:", lang);
+      info("session language:", lang);
     }
   }
 
@@ -726,9 +766,7 @@
         resolve(value);
       };
       const timer = setTimeout(() => {
-        console.error(
-          DEBUG_PREFIX,
-          `translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
+        err(`translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
           JSON.stringify(text)
         );
         finish("");
@@ -742,27 +780,21 @@
         (resp) => {
           const dt = Date.now() - t0;
           if (chrome.runtime.lastError) {
-            console.error(
-              DEBUG_PREFIX,
-              `translation runtime error after ${dt}ms:`,
+            err(`translation runtime error after ${dt}ms:`,
               chrome.runtime.lastError.message
             );
             finish("");
             return;
           }
           if (!resp?.ok) {
-            console.error(
-              DEBUG_PREFIX,
-              `translation failed after ${dt}ms:`,
+            err(`translation failed after ${dt}ms:`,
               resp?.error
             );
             finish("");
             return;
           }
           const joined = resp.translations.join("\n");
-          console.log(
-            DEBUG_PREFIX,
-            `translated in ${dt}ms:`,
+          info(`translated in ${dt}ms:`,
             JSON.stringify(text),
             "→",
             JSON.stringify(joined)
@@ -808,9 +840,9 @@
     if (text && text !== lastLoggedText) {
       lastLoggedText = text;
       domServed++;
-      console.log(DEBUG_PREFIX, "detected cue:", text);
+      info("detected cue:", text);
     } else if (!text && currentOriginal) {
-      console.log(DEBUG_PREFIX, "cue cleared");
+      info("cue cleared");
       lastLoggedText = null;
     }
     currentOriginal = text;
@@ -823,9 +855,7 @@
     // Source language is in the user's skip list — no API call, renderOverlay
     // will stand down (Method B: let the native subtitle show through).
     if (shouldSkipTranslation(text)) {
-      console.log(
-        DEBUG_PREFIX,
-        `skipped (${detectLang(text)} in skip list); showing native`
+      info(`skipped (${detectLang(text)} in skip list); showing native`
       );
       currentTranslated = text;
       renderOverlay();
@@ -1065,9 +1095,7 @@
                     (resp) => {
                       if (resp?.ok) resolve(resp.translations);
                       else {
-                        console.error(
-                          DEBUG_PREFIX,
-                          "batch translation failed:",
+                        err("batch translation failed:",
                           resp?.error
                         );
                         resolve(lines.map(() => ""));
@@ -1089,9 +1117,7 @@
                     c.translation = null;
                   }
                 });
-                console.log(
-                  DEBUG_PREFIX,
-                  `batch translated ${filled}/${batch.length} cues in ${dt}ms`
+                info(`batch translated ${filled}/${batch.length} cues in ${dt}ms`
                 );
               }
             })()
@@ -1139,9 +1165,7 @@
     if (cues.length) {
       const added = ingestParsedCues(cues);
       const sample = cues[0];
-      console.log(
-        DEBUG_PREFIX,
-        `captured subtitle segment (${cues.length} cues, ${added} new) ` +
+      info(`captured subtitle segment (${cues.length} cues, ${added} new) ` +
           `first cue: ${sample.start.toFixed(2)}s–${sample.end.toFixed(2)}s "${sample.text.slice(0, 40)}" ` +
           `from ${d.url?.slice(0, 80)}`
       );
@@ -1189,9 +1213,7 @@
     }
     timelineOffset = recent.slice().sort((a, b) => a - b)[1];
     offsetLocked = true;
-    console.log(
-      DEBUG_PREFIX,
-      `timeline calibrated: cue times are offset by ${timelineOffset.toFixed(2)}s ` +
+    info(`timeline calibrated: cue times are offset by ${timelineOffset.toFixed(2)}s ` +
         `from video.currentTime — pre-translated cues can now drive the display`
     );
   }
@@ -1243,7 +1265,7 @@
     }
     if (match.text !== currentOriginal) {
       timelineServed++;
-      console.log(DEBUG_PREFIX, "sync cue:", match.text);
+      info("sync cue:", match.text);
       lastLoggedText = match.text;
       currentOriginal = match.text;
       cueSetAt = Date.now();
@@ -1275,9 +1297,7 @@
     }
     const playingVideos = videos.filter((v) => !v.paused && v.readyState >= 2);
     const translatedCount = cueList.filter((c) => c.translation !== null).length;
-    console.log(
-      DEBUG_PREFIX,
-      `diag: videos=${videos.length} playing=${playingVideos.length} ` +
+    info(`diag: videos=${videos.length} playing=${playingVideos.length} ` +
         `platformMatches=[${platformMatches.join("; ") || "none"}] ` +
         `capturedCues=${cueList.length} preTranslated=${translatedCount} ` +
         `servedByTimeline=${timelineServed} servedLive=${domServed} ` +
@@ -1312,7 +1332,7 @@
     // shadow DOM / React-rebuilt nodes that many players use.
     pollTimer = setInterval(check, 200);
     check();
-    console.log(DEBUG_PREFIX, "observer started; platform =", platform.name);
+    info("observer started; platform =", platform.name);
     // One diagnostic dump every 3 seconds for the first 15 seconds so the
     // user can see whether we find videos / platform containers at all.
     let dumps = 0;
@@ -1360,6 +1380,32 @@
     else stopObserving();
     renderOverlay();
   }
+
+  // The settings page reads the log and the timing stats from here, so the
+  // whole diagnosis is available without opening DevTools.
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== "getLogs") return false;
+    if (!getVideos().length && !cueList.length) return false; // let the player's frame answer
+    const translated = cueList.filter((c) => c.translation !== null).length;
+    sendResponse({
+      host: location.hostname,
+      platform: platform.name,
+      playerPage: isPlayerPage(),
+      enabled: !!settings?.enabled,
+      targetLanguage: settings?.targetLanguage || "",
+      skipLanguages: settings?.skipLanguages || [],
+      sessionLanguage,
+      capturedCues: cueList.length,
+      preTranslated: translated,
+      servedByTimeline: timelineServed,
+      servedLive: domServed,
+      timelineOffset: offsetLocked ? timelineOffset : null,
+      currentOriginal: (currentOriginal || "").slice(0, 60),
+      currentTranslated: (currentTranslated || "").slice(0, 60),
+      logs: logBuffer.slice(-200),
+    });
+    return false;
+  });
 
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area !== "sync") return;
@@ -1420,9 +1466,7 @@
       cueList = [];
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
-      console.log(
-        DEBUG_PREFIX,
-        `new video detected (${id}); cue library cleared, re-evaluating`
+      info(`new video detected (${id}); cue library cleared, re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
       // and back should toggle the observer on/off accordingly.
