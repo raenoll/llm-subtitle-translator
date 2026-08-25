@@ -144,6 +144,9 @@
   const pending = new Map();
   let lastTranslationAt = 0;
   const MIN_INTERVAL_MS = 150;
+  // Most recent reply that came back still in the source language, surfaced
+  // by the diagnostics panel.
+  let lastUntranslated = null;
   // Safety net for the message round trip. The service worker bounds its own
   // network calls, but if it is torn down mid-flight the callback can simply
   // never fire. An unsettled promise never runs its .finally(), so the pending
@@ -320,6 +323,23 @@
     if (c.startsWith("zh")) return "简体中文";
     if (c.startsWith("en")) return "English";
     return null;
+  }
+
+  // A model sometimes hands back text still in the source language — an exact
+  // copy, or a near-copy with a character altered ("そうだ" → "そうか"). Byte
+  // equality misses the near-copies, so check the SCRIPT instead: a Chinese
+  // translation cannot legitimately contain kana or hangul.
+  function translationLooksUntranslated(translation, target) {
+    if (!translation) return false;
+    const t = String(target || "");
+    const kana = /[\u3040-\u309F\u30A0-\u30FF]/.test(translation);
+    const hangul = /[\uAC00-\uD7AF]/.test(translation);
+    const cjk = /[\u4E00-\u9FFF]/.test(translation);
+    if (/中文|Chinese|^zh/i.test(t)) return kana || hangul;
+    if (/English|英语|英文|^en/i.test(t)) return kana || hangul || cjk;
+    if (/Русский|Russian|^ru/i.test(t)) return kana || hangul || cjk;
+    // Targets that legitimately use these scripts, or ones we can't judge.
+    return false;
   }
 
   function shouldSkipTranslation(text) {
@@ -937,13 +957,24 @@
             "→",
             JSON.stringify(joined)
           );
-          if (joined && normalize(joined) === key) {
+          if (
+            joined &&
+            translationLooksUntranslated(joined, settings?.targetLanguage)
+          ) {
             console.warn(
               DEBUG_PREFIX,
-              "model returned the source UNCHANGED — the overlay will show " +
-                "the original text as if it were the translation:",
-              JSON.stringify(text)
+              `model did NOT translate — the reply is still in the source ` +
+                `language, not ${settings?.targetLanguage}:`,
+              JSON.stringify(text),
+              "→",
+              JSON.stringify(joined)
             );
+            lastUntranslated = { source: text, reply: joined, at: Date.now() };
+            // Do not cache it: caching would make this line permanently
+            // untranslated. Returning empty lets it be retried instead of
+            // painting the source text as if it were a translation.
+            finish("");
+            return;
           }
           cache.set(key, joined);
           if (cache.size > 500) {
@@ -1596,6 +1627,19 @@
       currentOriginal: (currentOriginal || "").slice(0, 40),
       currentTranslated: (currentTranslated || "").slice(0, 40),
       duplicated: !!currentTranslated && currentTranslated === currentOriginal,
+      provider: settings?.provider || "",
+      model: settings?.models?.[settings?.provider] || "(默认)",
+      translatedStillInSourceLanguage: translationLooksUntranslated(
+        currentTranslated,
+        settings?.targetLanguage
+      ),
+      lastUntranslatedReply: lastUntranslated
+        ? {
+            source: lastUntranslated.source.slice(0, 40),
+            reply: lastUntranslated.reply.slice(0, 40),
+            secondsAgo: Math.round((Date.now() - lastUntranslated.at) / 1000),
+          }
+        : null,
     });
     return false;
   });

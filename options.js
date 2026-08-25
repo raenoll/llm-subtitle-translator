@@ -176,10 +176,19 @@ function verdictFor(d) {
           : "")
     );
   }
-  if (d.duplicated) {
+  if (d.duplicated || d.translatedStillInSourceLanguage) {
     notes.push(
-      "❌ 译文与原文完全相同——是本扩展的覆盖层在绘制原文。" +
-        "通常意味着模型把原文原样返回，或该条被判定为「不需要翻译」。"
+      `❌ 模型没有翻译——返回的内容仍是源语言，不是${d.targetLanguage}。` +
+        `这不是显示问题，覆盖层只是如实显示了模型给的东西。` +
+        `当前后端：${d.provider} / ${d.model}。建议换个更强的模型试试。`
+    );
+  } else if (d.lastUntranslatedReply) {
+    const u = d.lastUntranslatedReply;
+    notes.push(
+      `⚠️ ${u.secondsAgo} 秒前有一条模型没有翻译（返回内容仍是源语言）：\n` +
+        `    ${u.source}\n  → ${u.reply}\n` +
+        `  该结果已被丢弃、未写入缓存，所以那一条会显示为空白而不是原文。` +
+        `当前后端：${d.provider} / ${d.model}。`
     );
   }
   if ((d.skipLanguages || []).includes(d.sessionLanguage)) {
@@ -193,6 +202,12 @@ function verdictFor(d) {
   }
   if (d.currentOriginal && !d.currentTranslated && !d.duplicated) {
     notes.push("⚠️ 这一条有原文但没有译文——翻译尚未返回或已失败。");
+  }
+  if (d.cueLibrarySize === 0) {
+    notes.push(
+      "ℹ️ 预翻译库为空——该平台的字幕文件没能被拦截解析（多为二进制封装），" +
+        "所以每句都要现场翻译。语速快时更容易来不及。"
+    );
   }
   if (!notes.length) {
     notes.push("✅ 未发现上述任何一类问题：原生字幕已隐藏，译文与原文不同。");
