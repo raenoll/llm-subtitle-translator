@@ -743,8 +743,25 @@
     return text.replace(/\s+/g, " ").trim();
   }
 
+  // Identity key for "is this the same cue?" and for the translation cache.
+  //
+  // The same cue does NOT normalize the same way from the two sources: the
+  // subtitle FILE keeps its line breaks (parseTTML turns <br/> into "\n"), while
+  // the DOM gives no separator at all, because <br> contributes nothing to
+  // textContent and the player renders both lines inside one container. So
+  // "（語り）\nイカフライレモンを作り" collapses to "（語り） イカフライレモンを作り"
+  // but the DOM yields "（語り）イカフライレモンを作り".
+  //
+  // With whitespace merely collapsed those never match, which silently defeats
+  // BOTH mechanisms: the timeline path fails its DOM sanity check and falls back
+  // to live translation, and the cache key differs so pre-translated cues are
+  // never found. Dropping whitespace entirely makes the two sources agree.
+  function compareKey(text) {
+    return (text || "").replace(/\s+/g, "");
+  }
+
   async function translateText(text) {
-    const key = normalize(text);
+    const key = compareKey(text);
     if (!key) return "";
     if (cache.has(key)) return cache.get(key);
     if (pending.has(key)) return pending.get(key);
@@ -1056,7 +1073,7 @@
         for (const c of cueList) {
           if (c.translation === null && shouldSkipTranslation(c.text)) {
             c.translation = c.text;
-            cache.set(normalize(c.text), c.text);
+            cache.set(compareKey(c.text), c.text);
           }
         }
         const pool = cueList.filter(
@@ -1066,13 +1083,18 @@
         const videos = getVideos();
         const cur =
           videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
-        const now = cur ? cur.currentTime : 0;
+        // Same clock the timeline display uses, so "nearest upcoming cue"
+        // really is the one about to be shown.
+        const now = (cur ? cur.currentTime : 0) - timelineOffset;
         pool.sort((a, b) => {
           const da = a.start >= now ? a.start - now : now - a.start + 1e6;
           const db = b.start >= now ? b.start - now : now - b.start + 1e6;
           return da - db;
         });
-        const MAX_CONCURRENT = 3;
+        // Each request measures 2–5s against this provider, so 3 workers only
+        // just keep ahead of playback and any stall puts the playhead in front
+        // of the translated window.
+        const MAX_CONCURRENT = 5;
         // One cue per API call — no delimiter, no parser ambiguity. With
         // 3 concurrent workers this still burns through the queue quickly.
         const BATCH_SIZE = 1;
@@ -1110,7 +1132,7 @@
                   c.translating = false;
                   if (tr) {
                     c.translation = tr;
-                    cache.set(normalize(c.text), tr);
+                    cache.set(compareKey(c.text), tr);
                     filled++;
                   } else {
                     // Leave as null so the next scheduler pass retries.
@@ -1195,10 +1217,10 @@
     const videos = getVideos();
     const video = videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
     if (!video || !isFinite(video.currentTime)) return;
-    const key = normalize(domText);
+    const key = compareKey(domText);
     // Only calibrate off a line that appears exactly once, so the sample is
     // unambiguous.
-    const hits = cueList.filter((c) => normalize(c.text) === key);
+    const hits = cueList.filter((c) => compareKey(c.text) === key);
     if (hits.length !== 1) return;
     const delta = video.currentTime - hits[0].start;
     if (!isFinite(delta) || Math.abs(delta) > 3600) return;
@@ -1251,7 +1273,7 @@
     // Treat empty string same as null — a previous batch may have recorded
     // a failure, and we want to retry / fall back rather than display blank.
     if (!match.translation) {
-      const cached = cache.get(normalize(match.text));
+      const cached = cache.get(compareKey(match.text));
       if (cached) match.translation = cached;
       else return false; // fall through to DOM
     }
@@ -1260,7 +1282,7 @@
     // guards against presentationTimeOffset mismatches (video.currentTime
     // and TTML cue times can be off by many seconds on some titles).
     const domText = extractSubtitle();
-    if (domText && normalize(domText) !== normalize(match.text)) {
+    if (domText && compareKey(domText) !== compareKey(match.text)) {
       return false;
     }
     if (match.text !== currentOriginal) {
