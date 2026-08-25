@@ -11,6 +11,39 @@
   window.__llmSubtitleCaptureLoaded = true;
 
   const TAG = "__llm-subtitle-capture";
+  const CANDIDATE_TAG = "__llm-subtitle-candidate";
+
+  // Diagnostics: the narrow gate below decides what we even try to parse. When
+  // a platform serves subtitles from a URL that gate doesn't recognise, nothing
+  // is captured and pre-translation silently does nothing. Record METADATA only
+  // (never bodies — that would mean reading every text response on the page) for
+  // anything remotely subtitle-shaped, so the gap is visible instead of guessed.
+  const CANDIDATE_LIMIT = 25;
+  let candidatesSent = 0;
+
+  function urlWorthNoting(url) {
+    return /subtitle|caption|timedtext|\/cc\/|dfxp|ttml|\.vtt|\.srt|sami|\.smi|\btrack\b|text_?track/i.test(
+      url || ""
+    );
+  }
+
+  function noteCandidate(url, ct, narrowGate, sniffed) {
+    if (candidatesSent >= CANDIDATE_LIMIT) return;
+    if (!urlWorthNoting(url) && !contentTypeLooksLikeSubtitle(ct)) return;
+    candidatesSent++;
+    try {
+      window.postMessage(
+        {
+          source: CANDIDATE_TAG,
+          url: String(url || "").slice(0, 180),
+          contentType: String(ct || ""),
+          narrowGate,
+          sniffed,
+        },
+        location.origin
+      );
+    } catch (_) {}
+  }
 
   function urlString(input) {
     try {
@@ -73,14 +106,20 @@
       try {
         const url = urlString(args[0]);
         const ct = resp.headers.get("content-type") || "";
-        if (urlLooksLikeSubtitle(url) || contentTypeLooksLikeSubtitle(ct)) {
+        const narrowGate =
+          urlLooksLikeSubtitle(url) || contentTypeLooksLikeSubtitle(ct);
+        if (narrowGate) {
           resp
             .clone()
             .text()
             .then((text) => {
-              if (bodyLooksLikeSubtitle(text)) forward(url, text, ct);
+              const sniffed = bodyLooksLikeSubtitle(text);
+              noteCandidate(url, ct, true, sniffed);
+              if (sniffed) forward(url, text, ct);
             })
             .catch(() => {});
+        } else {
+          noteCandidate(url, ct, false, null);
         }
       } catch (_) {}
       return resp;
@@ -101,14 +140,19 @@
       try {
         const url = this.__llmUrl || "";
         const ct = this.getResponseHeader("content-type") || "";
-        if (!(urlLooksLikeSubtitle(url) || contentTypeLooksLikeSubtitle(ct))) return;
+        if (!(urlLooksLikeSubtitle(url) || contentTypeLooksLikeSubtitle(ct))) {
+          noteCandidate(url, ct, false, null);
+          return;
+        }
         let text = "";
         try {
           text = this.responseType === "" || this.responseType === "text"
             ? this.responseText
             : "";
         } catch (_) {}
-        if (bodyLooksLikeSubtitle(text)) forward(url, text, ct);
+        const sniffed = bodyLooksLikeSubtitle(text);
+        noteCandidate(url, ct, true, sniffed);
+        if (sniffed) forward(url, text, ct);
       } catch (_) {}
     });
     return origSend.apply(this, arguments);

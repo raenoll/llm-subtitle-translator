@@ -147,6 +147,13 @@
   // Most recent reply that came back still in the source language, surfaced
   // by the diagnostics panel.
   let lastUntranslated = null;
+  // Subtitle-shaped requests the page made, recorded by inject.js. Lets the
+  // diagnostics panel show WHY nothing was captured instead of guessing.
+  const captureCandidates = [];
+  // How often a translation arrived too late to be shown, and how many lines
+  // the model failed to translate — the two ways a line ends up blank.
+  let droppedLate = 0;
+  let droppedUntranslated = 0;
   // Safety net for the message round trip. The service worker bounds its own
   // network calls, but if it is torn down mid-flight the callback can simply
   // never fire. An unsettled promise never runs its .finally(), so the pending
@@ -970,6 +977,7 @@
               JSON.stringify(joined)
             );
             lastUntranslated = { source: text, reply: joined, at: Date.now() };
+            droppedUntranslated++;
             // Do not cache it: caching would make this line permanently
             // untranslated. Returning empty lets it be retried instead of
             // painting the source text as if it were a translation.
@@ -1065,6 +1073,15 @@
     if (captured === currentOriginal) {
       currentTranslated = translation;
       renderOverlay();
+    } else if (translation) {
+      // The line ended before its translation came back. Showing it now would
+      // paint the previous line's text over the current one, so it is dropped —
+      // the cache keeps it, but this cue displays nothing at all.
+      droppedLate++;
+      log(
+        `translation arrived too late, cue already gone (dropped ${droppedLate} so far):`,
+        JSON.stringify(captured)
+      );
     }
   }
 
@@ -1362,6 +1379,17 @@
     if (e.source !== window) return;
     if (e.origin && e.origin !== location.origin) return;
     const d = e.data;
+    if (d?.source === "__llm-subtitle-candidate") {
+      if (captureCandidates.length < 25) {
+        captureCandidates.push({
+          url: String(d.url || "").slice(0, 180),
+          contentType: String(d.contentType || ""),
+          passedUrlGate: !!d.narrowGate,
+          bodyLookedLikeSubtitle: d.sniffed,
+        });
+      }
+      return;
+    }
     if (!d || d.source !== "__llm-subtitle-capture") return;
     if (typeof d.text !== "string") return;
     const text = String(d.text || "");
@@ -1615,6 +1643,9 @@
       targetLanguage: settings?.targetLanguage || "",
       showOriginal: !!settings?.showOriginal,
       cueLibrarySize: cueLibrary.size,
+      droppedLate,
+      droppedUntranslated,
+      captureCandidates,
       skipMarked: skipMarkedKeys.size,
       nativeCues: cues,
       overlay: ov

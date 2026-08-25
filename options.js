@@ -204,9 +204,37 @@ function verdictFor(d) {
     notes.push("⚠️ 这一条有原文但没有译文——翻译尚未返回或已失败。");
   }
   if (d.cueLibrarySize === 0) {
+    const cands = d.captureCandidates || [];
+    const passed = cands.filter((c) => c.passedUrlGate);
+    let detail = "";
+    if (!cands.length) {
+      detail = "播放期间没有观察到任何像字幕的请求——字幕可能是二进制封装或走了别的通道。";
+    } else if (!passed.length) {
+      detail =
+        `观察到 ${cands.length} 个疑似字幕请求，但没有一个通过 URL/类型判定，` +
+        `所以从未被解析。这些 URL 见下方 captureCandidates。`;
+    } else {
+      const sniffFailed = passed.filter((c) => c.bodyLookedLikeSubtitle === false);
+      detail =
+        `有 ${passed.length} 个请求通过了判定，其中 ${sniffFailed.length} 个内容不是可解析的` +
+        `纯文本字幕（多为二进制封装）。`;
+    }
     notes.push(
-      "ℹ️ 预翻译库为空——该平台的字幕文件没能被拦截解析（多为二进制封装），" +
-        "所以每句都要现场翻译。语速快时更容易来不及。"
+      "ℹ️ 预翻译没有生效（cueLibrarySize = 0），所以每句都要等一次完整的 API 往返，" +
+        "而这时台词已经在播了。长句会在念到一半时才出译文，短句则可能整句来不及显示。\n  " +
+        detail
+    );
+  }
+  if (d.droppedLate) {
+    notes.push(
+      `ℹ️ 已有 ${d.droppedLate} 句因译文回来得太晚（字幕已经切走）而被丢弃——` +
+        `这就是"整句没有任何显示"的直接原因。`
+    );
+  }
+  if (d.droppedUntranslated) {
+    notes.push(
+      `ℹ️ 已有 ${d.droppedUntranslated} 句因模型没有翻译（返回源语言）而被丢弃。` +
+        `这些同样表现为空白，属于模型问题而非时序问题。`
     );
   }
   if (!notes.length) {
