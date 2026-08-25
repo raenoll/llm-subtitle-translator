@@ -494,6 +494,12 @@
     // hide the original row so the same line isn't shown twice.
     const duplicated =
       currentTranslated && currentTranslated === currentOriginal;
+    if (duplicated) {
+      log(
+        "translation is identical to the source — our overlay is painting the " +
+          "original text (this is NOT the native subtitle showing through)"
+      );
+    }
     oEl.style.display =
       settings.showOriginal && currentOriginal && !duplicated
         ? "block"
@@ -556,6 +562,25 @@
         root === document
           ? "native subtitles hidden"
           : "native subtitles hidden (inside a shadow root)"
+      );
+    }
+    // Verify the OUTCOME, not merely that the rule was injected. A <style>
+    // that cannot reach the cue fails completely silently — that is exactly
+    // how the shadow-DOM case went unnoticed for so long. Runs only on the
+    // injection path, so it is not a per-tick cost.
+    const stillVisible = nativeCueElements().filter(
+      (el) => parseFloat(getComputedStyle(el).opacity || "1") > 0
+    );
+    if (stillVisible.length) {
+      console.warn(
+        DEBUG_PREFIX,
+        `hide rule injected, but ${stillVisible.length} native cue element(s) ` +
+          `are STILL VISIBLE — the raw source line will show through:`,
+        stillVisible.map((el) => ({
+          cls: el.className || el.tagName,
+          opacity: getComputedStyle(el).opacity,
+          inShadowRoot: el.getRootNode?.() !== document,
+        }))
       );
     }
   }
@@ -912,6 +937,14 @@
             "→",
             JSON.stringify(joined)
           );
+          if (joined && normalize(joined) === key) {
+            console.warn(
+              DEBUG_PREFIX,
+              "model returned the source UNCHANGED — the overlay will show " +
+                "the original text as if it were the translation:",
+              JSON.stringify(text)
+            );
+          }
           cache.set(key, joined);
           if (cache.size > 500) {
             const firstKey = cache.keys().next().value;
