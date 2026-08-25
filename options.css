@@ -282,3 +282,79 @@ button.ghost:hover { background: var(--bg); }
 .save-status.visible { opacity: 0.92; }
 
 .hint { color: var(--muted); font-size: 12px; }
+
+/* A control that is unavailable because the other font mode owns it. */
+.row.is-disabled label,
+.row.is-disabled .hint { opacity: 0.45; }
+.switch input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
+input:disabled,
+select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Live readout of the streaming site's own subtitle font */
+.native-font {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.native-font.ok { color: var(--fg); border-style: solid; }
+
+/* Range slider + its live value readout */
+input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+.range-value {
+  min-width: 46px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtitle style preview — a stand-in for a bright video frame, so the
+   backdrop opacity can be judged without switching to a real player. */
+.subtitle-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 118px;
+  padding: 14px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(135deg, #d7dee3 0%, #f4efe3 45%, #a9bccd 100%);
+  text-align: center;
+  overflow: hidden;
+}
+.preview-translated,
+.preview-original {
+  border-radius: 6px;
+  padding: 0.08em 0.45em;
+  max-width: 100%;
+}
+.preview-translated {
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.25;
+  text-shadow:
+    -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000,
+    0 0 6px rgba(0, 0, 0, 0.9);
+}
+.preview-original {
+  color: #dedede;
+  font-weight: 500;
+  line-height: 1.2;
+  text-shadow:
+    -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000,
+    0 0 4px rgba(0, 0, 0, 0.9);
+}

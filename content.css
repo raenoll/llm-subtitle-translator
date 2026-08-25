@@ -30,24 +30,40 @@
     -2px 2px 0 #000,
     2px 2px 0 #000,
     0 0 6px rgba(0, 0, 0, 0.9);
-  padding: 0 8px;
+  /* Backdrop behind the text. --llm-sub-bg is set from JS out of the user's
+     settings; the fallback here keeps the default look if JS hasn't run yet.
+     Padding is in em so the box grows with the (dynamically scaled) text. */
+  background: var(--llm-sub-bg, rgba(0, 0, 0, 0.35));
+  border-radius: 6px;
+  padding: 0.08em 0.45em;
   white-space: pre-line;
 }
 
 #llm-subtitle-overlay .llm-subtitle-original {
-  color: #e8e8e8;
+  /* Dimmed via the color itself rather than `opacity`, so the backdrop below
+     keeps the exact alpha the user configured. */
+  color: #dedede;
   font-size: 1.35rem;
   font-weight: 500;
   line-height: 1.2;
-  opacity: 0.92;
   text-shadow:
     -1px -1px 0 #000,
     1px -1px 0 #000,
     -1px 1px 0 #000,
     1px 1px 0 #000,
     0 0 4px rgba(0, 0, 0, 0.9);
-  padding: 0 8px;
+  background: var(--llm-sub-bg, rgba(0, 0, 0, 0.35));
+  border-radius: 6px;
+  padding: 0.08em 0.45em;
   white-space: pre-line;
+}
+
+/* A row with no text must not paint its padding / backdrop. renderOverlay()
+   also toggles display per row; this is the structural guarantee, covering
+   any paint that happens before the first render pass runs. */
+#llm-subtitle-overlay .llm-subtitle-translated:empty,
+#llm-subtitle-overlay .llm-subtitle-original:empty {
+  display: none !important;
 }
 
 /* Compact sizing for smaller viewports */

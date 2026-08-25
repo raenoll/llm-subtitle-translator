@@ -191,7 +191,27 @@
 
       <section class="card">
         <h2>4. 译文样式</h2>
+        <div class="row" id="rowInherit">
+          <label>保留当前字体及字号</label>
+          <label class="switch">
+            <input id="fontInherit" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+          <small class="hint">
+            直接沿用当前流媒体网站正在渲染的字幕字体与字号，自动继承你在
+            Netflix / YouTube 等平台里设的字幕大小，并随播放器尺寸变化。
+            读不到时（平台字幕关闭、或字幕烧录在画面里）回退到下面的自定义设置。
+          </small>
+        </div>
         <div class="row">
+          <label>自定义字体及字号</label>
+          <label class="switch">
+            <input id="fontCustom" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+          <small class="hint">开启后改用下面填写的字体与字号，上面的继承开关变灰不可用。</small>
+        </div>
+        <div class="row" id="rowFontFamily">
           <label>字体</label>
           <input
             id="fontFamily"
@@ -200,17 +220,52 @@
           />
           <small class="hint">填任意 CSS font-family 值。留空则使用系统默认。</small>
         </div>
-        <div class="row">
+        <div class="row" id="rowFontSize">
           <label>字号 (px)</label>
           <input id="fontSize" type="number" min="12" max="96" />
           <small class="hint">
             以 1080p 视频为基准自动等比缩放——4K 全屏约 2 倍，720p 窗口约 0.67 倍。
           </small>
         </div>
+        <div class="row">
+          <label>当前网站字体</label>
+          <div class="input-with-button">
+            <span id="nativeFontInfo" class="native-font">读取中…</span>
+            <button id="nativeFontRefresh" type="button" class="ghost">刷新</button>
+          </div>
+          <small class="hint">
+            实时读取当前打开的流媒体标签页正在使用的字幕字体与字号，两种模式下都会显示。
+            需要该标签页正在播放并且平台字幕已打开。
+          </small>
+        </div>
+        <div class="row">
+          <label>文字底</label>
+          <label class="switch">
+            <input id="textBgEnabled" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+          <small class="hint">在文字后面垫一层半透明黑底，画面偏亮时字幕更清楚。</small>
+        </div>
+        <div class="row">
+          <label>底色浓度</label>
+          <div class="input-with-button">
+            <input id="textBgOpacity" type="range" min="0" max="90" step="5" />
+            <span id="textBgOpacityValue" class="range-value"></span>
+          </div>
+          <small class="hint">0% 完全透明，90% 接近纯黑；默认 35%（淡黑底）。</small>
+        </div>
+        <div class="row">
+          <label>预览</label>
+          <div class="subtitle-preview">
+            <div class="preview-translated" id="previewTranslated">这是字幕预览效果</div>
+            <div class="preview-original" id="previewOriginal">This is a subtitle preview</div>
+          </div>
+          <small class="hint" id="previewHint">背景为模拟的亮画面，实际字号会按视频分辨率缩放。</small>
+        </div>
       </section>
 
       <section class="card">
-        <h2>3. 使用说明</h2>
+        <h2>5. 使用说明</h2>
         <ol class="steps">
           <li>在 Chrome 地址栏打开 <code>chrome://extensions</code>，开启「开发者模式」。</li>
           <li>点击「加载已解压的扩展程序」，选择这个项目文件夹。</li>
@@ -224,7 +279,7 @@
       </section>
 
       <section class="card">
-        <h2>4. 支持的平台</h2>
+        <h2>6. 支持的平台</h2>
         <ul class="platforms">
           <li>Netflix</li>
           <li>Disney+ / Hotstar</li>

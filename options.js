@@ -48,11 +48,168 @@ async function load() {
   $("showOriginal").checked = !!s.showOriginal;
   $("enabled").checked = !!s.enabled;
   $("debug").checked = !!s.debug;
+  applyFontMode(s.fontSource || "custom");
   $("fontFamily").value = s.fontFamily || "";
   $("fontSize").value = s.fontSize ?? 32;
   $("googleProjectId").value = s.googleProjectId || "";
   $("googleLocation").value = s.googleLocation || "us-central1";
+  $("textBgEnabled").checked = s.textBgEnabled !== false;
+  $("textBgOpacity").value = s.textBgOpacity ?? 35;
   applyProviderSwap();
+  updateStylePreview();
+}
+
+// --- Font mode ------------------------------------------------------------
+// "保留当前字体及字号" and "自定义字体及字号" are two views of one stored
+// value, so they can never disagree or both end up off. Custom is the control;
+// the inherit switch mirrors it and greys out while custom owns the font.
+
+function applyFontMode(mode) {
+  const custom = mode === "custom";
+  $("fontInherit").checked = !custom;
+  $("fontCustom").checked = custom;
+  // Requirement: with custom on, the inherit switch is greyed and unusable.
+  $("fontInherit").disabled = custom;
+  $("rowInherit").classList.toggle("is-disabled", custom);
+  // Symmetrically, the custom font fields are dead while inheriting.
+  $("fontFamily").disabled = !custom;
+  $("fontSize").disabled = !custom;
+  $("rowFontFamily").classList.toggle("is-disabled", !custom);
+  $("rowFontSize").classList.toggle("is-disabled", !custom);
+  updateStylePreview();
+}
+
+function setFontMode(mode) {
+  applyFontMode(mode);
+  saveField("fontSource", mode);
+}
+
+$("fontCustom").addEventListener("change", (e) =>
+  setFontMode(e.target.checked ? "custom" : "platform")
+);
+$("fontInherit").addEventListener("change", (e) =>
+  setFontMode(e.target.checked ? "platform" : "custom")
+);
+
+// --- Live font readout from the open streaming tab ------------------------
+// Kept up to date in both modes, so the current site's font is always visible.
+// Host permissions already cover these origins, so tabs.query needs no extra
+// permission; the URL filter also keeps us from touching unrelated tabs.
+const STREAMING_MATCHES = [
+  "https://*.netflix.com/*",
+  "https://*.disneyplus.com/*",
+  "https://*.hotstar.com/*",
+  "https://*.primevideo.com/*",
+  "https://*.amazon.com/*",
+  "https://*.youtube.com/*",
+  "https://*.hbomax.com/*",
+  "https://*.max.com/*",
+  "https://tv.apple.com/*",
+  "https://*.tver.jp/*",
+];
+
+let nativeFontReading = null; // last successful read, for the preview
+
+function showNativeFont(text, ok = false) {
+  const el = $("nativeFontInfo");
+  el.textContent = text;
+  el.classList.toggle("ok", ok);
+}
+
+async function refreshNativeFont() {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: STREAMING_MATCHES });
+  } catch (err) {
+    showNativeFont(`无法查询标签页：${err.message}`);
+    return;
+  }
+  if (!tabs.length) {
+    nativeFontReading = null;
+    showNativeFont("未检测到已打开的流媒体页面");
+    updateStylePreview();
+    return;
+  }
+  const tab = tabs.find((t) => t.active) || tabs[0];
+  const host = (() => {
+    try {
+      return new URL(tab.url).hostname;
+    } catch (_) {
+      return "";
+    }
+  })();
+  const resp = await new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tab.id, { type: "getNativeFont" }, (r) => {
+        void chrome.runtime.lastError; // silent when no frame answers
+        resolve(r);
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+  if (!resp) {
+    nativeFontReading = null;
+    showNativeFont(`${host} · 页面无响应，刷新该标签页后重试`);
+  } else if (!resp.fontSize) {
+    nativeFontReading = null;
+    showNativeFont(`${host} · 已连接，但当前没有字幕可测量`);
+  } else {
+    nativeFontReading = {
+      fontFamily: resp.fontFamily,
+      fontSize: resp.fontSize,
+    };
+    const size = Math.round(resp.fontSize);
+    showNativeFont(
+      `${host} · ${resp.fontFamily} · ${size}px${resp.live ? "" : "（上次读数）"}`,
+      true
+    );
+  }
+  updateStylePreview();
+}
+
+$("nativeFontRefresh").addEventListener("click", refreshNativeFont);
+// Poll while the page is actually being looked at.
+setInterval(() => {
+  if (!document.hidden) refreshNativeFont();
+}, 2000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshNativeFont();
+});
+
+// Mirrors the overlay styling in content.css / renderOverlay() so the font
+// and backdrop settings can be judged without switching to a real player.
+function updateStylePreview() {
+  const inheriting = $("fontInherit").checked;
+  // While inheriting, preview what the open player actually reported.
+  const useNative = inheriting && nativeFontReading;
+  const fam = useNative
+    ? nativeFontReading.fontFamily
+    : $("fontFamily").value.trim();
+  const on = $("textBgEnabled").checked;
+  const pct = on ? Math.max(0, Math.min(90, Number($("textBgOpacity").value) || 0)) : 0;
+  const bg = `rgba(0, 0, 0, ${pct / 100})`;
+  // The preview box is far smaller than a real frame, so shrink the
+  // configured size into something that fits instead of using it verbatim.
+  const rawSize = useNative
+    ? nativeFontReading.fontSize
+    : Number($("fontSize").value) || 32;
+  const px = Math.max(12, Math.min(34, rawSize * 0.7));
+  const t = $("previewTranslated");
+  const o = $("previewOriginal");
+  t.style.fontFamily = fam || "";
+  t.style.fontSize = `${px}px`;
+  t.style.background = bg;
+  o.style.fontFamily = fam || "";
+  o.style.fontSize = `${Math.round(px * 0.65)}px`;
+  o.style.background = bg;
+  o.style.display = $("showOriginal").checked ? "block" : "none";
+  $("textBgOpacityValue").textContent = on ? `${pct}%` : "关闭";
+  $("previewHint").textContent = !inheriting
+    ? "背景为模拟的亮画面，实际字号会按视频分辨率缩放。"
+    : useNative
+      ? `按上面读到的网站字体预览（${Math.round(nativeFontReading.fontSize)}px 已缩放以适应预览框）。`
+      : "跟随网站字体，但当前读不到；播放时将回退到下面的自定义设置。";
 }
 
 function applyProviderSwap() {
@@ -165,6 +322,18 @@ bindText("fontFamily", "fontFamily");
 bindText("fontSize", "fontSize", (v) => Number(v));
 bindText("googleProjectId", "googleProjectId");
 bindText("googleLocation", "googleLocation");
+bindCheckbox("textBgEnabled", "textBgEnabled");
+bindText("textBgOpacity", "textBgOpacity", (v) => Number(v));
+
+for (const id of [
+  "fontFamily",
+  "fontSize",
+  "textBgEnabled",
+  "textBgOpacity",
+  "showOriginal",
+]) {
+  $(id).addEventListener("input", updateStylePreview);
+}
 
 // Show/hide password inputs (shared helper)
 function bindPasswordToggle(inputId, btnId) {
@@ -284,3 +453,4 @@ $("testBtn").addEventListener("click", async () => {
 });
 
 load();
+refreshNativeFont();

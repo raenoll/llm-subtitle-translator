@@ -33,8 +33,15 @@ const DEFAULT_SETTINGS = {
   batchSize: 3,
   contextLines: 0,
   debug: false,
+  // "custom" = use fontFamily/fontSize below; "platform" = read the font off
+  // the streaming player's own cues and fall back to these when unreadable.
+  fontSource: "custom",
   fontFamily: "",
   fontSize: 32,
+  // Semi-transparent backdrop behind the subtitle text. The outline alone is
+  // hard to read over bright scenes, so a faint black box is on by default.
+  textBgEnabled: true,
+  textBgOpacity: 35, // percent, 0-90
 };
 
 const PROVIDER_DEFAULT_MODEL = {
@@ -76,11 +83,87 @@ async function getSettings() {
 }
 
 function buildSystemPrompt(targetLanguage) {
+  // NOTE: describe the delimiter as a real line break, never as the escape
+  // notation. Writing "\\n" here puts the two characters backslash-n into the
+  // prompt, and models mirror that convention straight back into the cue text.
   return (
     `Translate subtitles to ${targetLanguage}. Output the translation only, ` +
-    `no quotes or explanations. Keep it short. If multiple lines are joined ` +
-    `by '\\n---\\n', translate each and rejoin with the same delimiter.`
+    `no quotes or explanations. Keep it short. Write plain text with real ` +
+    `line breaks — never escape sequences such as a backslash followed by n. ` +
+    `If the input holds several cues separated by a line containing only ---, ` +
+    `translate each and rejoin them with that same separator line.`
   );
+}
+
+// --- Output cleanup -------------------------------------------------------
+// Whatever the prompt says, models still slip in escape sequences, wrapping
+// quotes and code fences, and Google's endpoints HTML-escape apostrophes even
+// with format:text. None of that is translated text, so strip it before it
+// can reach the overlay.
+
+const NAMED_ENTITIES = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  hellip: "…",
+  mdash: "—",
+  ndash: "–",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  ldquo: "\u201c",
+  rdquo: "\u201d",
+};
+
+function decodeHtmlEntities(s) {
+  return s.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, ent) => {
+    if (ent[0] === "#") {
+      const hex = ent[1] === "x" || ent[1] === "X";
+      const code = parseInt(hex ? ent.slice(2) : ent.slice(1), hex ? 16 : 10);
+      if (!Number.isFinite(code) || code <= 0) return m;
+      try {
+        return String.fromCodePoint(code);
+      } catch (_) {
+        return m;
+      }
+    }
+    const hit = NAMED_ENTITIES[ent.toLowerCase()];
+    return hit === undefined ? m : hit;
+  });
+}
+
+// Turn literal escape sequences (the two characters backslash + n) into the
+// whitespace they stand for. Runs on its own before the delimiter split, so a
+// model that wrote the separator in escaped form still parses correctly.
+function unescapeLiterals(s) {
+  return s
+    .replace(/\\{1,2}r\\{1,2}n/g, "\n")
+    .replace(/\\{1,2}[nr]/g, "\n")
+    .replace(/\\{1,2}t/g, " ")
+    .replace(/\\(["'\\])/g, "$1");
+}
+
+function sanitizeTranslation(text) {
+  let s = unescapeLiterals(String(text ?? ""));
+  if (!s.trim()) return "";
+  // Markdown code fence around the whole reply.
+  s = s.replace(/^\s*```[a-zA-Z]*\s*\n?/, "").replace(/\n?\s*```\s*$/, "");
+  s = decodeHtmlEntities(s);
+  // Leftover separator lines at either end (a cue never starts or ends with
+  // one; interior "---" is left alone in case it's real dialogue punctuation).
+  s = s.replace(/^(?:\s*-{3,}\s*\n)+/, "").replace(/(?:\n\s*-{3,}\s*)+$/, "");
+  // A single pair of straight quotes the model wrapped around everything.
+  // Only when there are none inside, so real quoted dialogue survives.
+  const quoted = s.trim().match(/^"([^"]*)"$/);
+  if (quoted) s = quoted[1];
+  // Tidy spacing without collapsing the cue's own line breaks.
+  return s
+    .replace(/[ \t\u00a0]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
 }
 
 function buildContextBlock(history, targetLanguage) {
@@ -372,8 +455,9 @@ async function translate({ lines, history }) {
       targetCode,
       lines,
     });
-    if (translations.length === lines.length) return translations;
-    return lines.map((_, i) => translations[i] || "");
+    if (translations.length === lines.length)
+      return translations.map(sanitizeTranslation);
+    return lines.map((_, i) => sanitizeTranslation(translations[i] || ""));
   }
   if (settings.provider === "google-translate-v3") {
     const targetCode = googleLangCode(settings.targetLanguage);
@@ -389,8 +473,9 @@ async function translate({ lines, history }) {
       targetCode,
       lines,
     });
-    if (translations.length === lines.length) return translations;
-    return lines.map((_, i) => translations[i] || "");
+    if (translations.length === lines.length)
+      return translations.map(sanitizeTranslation);
+    return lines.map((_, i) => sanitizeTranslation(translations[i] || ""));
   }
 
   const model =
@@ -433,10 +518,13 @@ async function translate({ lines, history }) {
       throw new Error(`未知 provider: ${settings.provider}`);
   }
 
-  const parts = output.split(/\n---\n/);
-  if (parts.length === lines.length) return parts.map((s) => s.trim());
+  // Unescape first: a model that wrote the separator as escape notation
+  // would otherwise fail the split and send every cue back for a retry.
+  const cleaned = unescapeLiterals(output);
+  const parts = cleaned.split(/\n\s*-{3,}\s*\n/);
+  if (parts.length === lines.length) return parts.map(sanitizeTranslation);
   // Single-cue path: no delimiter needed, output is the translation as-is.
-  if (lines.length === 1) return [output.trim()];
+  if (lines.length === 1) return [sanitizeTranslation(cleaned)];
   // Multi-cue batch where the model didn't respect our delimiter: we can't
   // safely reassign output lines to inputs (the old byLine fallback happily
   // treated untranslated source lines as "translations"). Return empty so

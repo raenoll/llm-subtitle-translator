@@ -354,10 +354,35 @@
       if (h > 0) scale = Math.max(0.5, Math.min(3.0, h / 1080));
     }
     const sz = baseSize * scale;
-    tEl.style.fontFamily = fam || "";
-    tEl.style.fontSize = sz > 0 ? `${sz}px` : "";
-    oEl.style.fontFamily = fam || "";
-    oEl.style.fontSize = sz > 0 ? `${Math.round(sz * 0.65)}px` : "";
+    // Backdrop behind both rows. Driven through a custom property so
+    // content.css owns the shape (radius / padding) and JS only sets alpha.
+    const bgAlpha =
+      settings.textBgEnabled === false
+        ? 0
+        : Math.max(0, Math.min(100, Number(settings.textBgOpacity ?? 35))) / 100;
+    ov.style.setProperty("--llm-sub-bg", `rgba(0, 0, 0, ${bgAlpha})`);
+    // Either the user's own font (scaled to the video height, above) or
+    // whatever the platform is currently rendering its cues at. The platform
+    // value is already in rendered px, so it takes no further scaling.
+    let famOut = fam || "";
+    let sizeOut = sz;
+    if (settings.fontSource === "platform") {
+      const nat = readNativeFont();
+      if (nat) {
+        famOut = nat.fontFamily;
+        sizeOut = nat.fontSize;
+      }
+      // No cue has ever been measured (platform captions off, or cues that
+      // never reach the DOM) — fall through to the configured values.
+    }
+    tEl.style.fontFamily = famOut;
+    tEl.style.fontSize = sizeOut > 0 ? `${sizeOut}px` : "";
+    oEl.style.fontFamily = famOut;
+    oEl.style.fontSize = sizeOut > 0 ? `${Math.round(sizeOut * 0.65)}px` : "";
+    // Hide an empty row outright. A row with no text still paints its padding
+    // and backdrop, which shows up as a stray black sliver while a cue waits
+    // for its translation to come back.
+    tEl.style.display = currentTranslated ? "block" : "none";
     // When translation equals original (e.g., skip-translation language hit),
     // hide the original row so the same line isn't shown twice.
     const duplicated =
@@ -441,8 +466,23 @@
     return false;
   }
 
-  function findByPlatformSelectors() {
-    if (!platform.containerSelectors.length) return "";
+  // The visible, innermost native cue containers currently painted over the
+  // video. Both the text extractor and the native-font reader work off this
+  // list, so it's memoized for a fraction of the 200ms poll interval: callers
+  // within one tick share a single DOM walk instead of each doing their own.
+  let cueElsCache = { at: 0, els: [] };
+  const CUE_ELS_TTL_MS = 100;
+
+  function nativeCueElements() {
+    const now = Date.now();
+    if (now - cueElsCache.at < CUE_ELS_TTL_MS) return cueElsCache.els;
+    const els = collectNativeCueElements();
+    cueElsCache = { at: now, els };
+    return els;
+  }
+
+  function collectNativeCueElements() {
+    if (!platform.containerSelectors.length) return [];
     const joined = platform.containerSelectors.join(", ");
     const all = [];
     try {
@@ -471,9 +511,13 @@
       }
       return isInsideVideoRegion(el, videos);
     });
+    return visible;
+  }
+
+  function findByPlatformSelectors() {
     const seenText = new Set();
     const texts = [];
-    for (const el of visible) {
+    for (const el of nativeCueElements()) {
       const t = (el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t) continue;
       if (seenText.has(t)) continue;
@@ -481,6 +525,51 @@
       texts.push(t);
     }
     return texts.join("\n").trim();
+  }
+
+  // -------------- native cue font --------------
+  // What the platform is actually rendering its own subtitles at. Readable
+  // even while we're hiding them, because hideNativeSubtitles() uses opacity
+  // rather than display — the cues keep their layout and computed styles.
+  //
+  // Reading this instead of our own px setting means the overlay inherits the
+  // platform's caption-size preference and its own player-size scaling for
+  // free, so no 1080p-relative scaling is applied on top.
+  let nativeFont = null; // last good read: { fontFamily, fontSize }
+
+  // The platform sets the cue font on the innermost span, not the container
+  // the selectors match, so descend to the deepest node holding real text.
+  function deepestTextBearer(root) {
+    let best = null;
+    let bestDepth = -1;
+    const stack = [[root, 0]];
+    while (stack.length) {
+      const [node, depth] = stack.pop();
+      const hasDirectText = [...node.childNodes].some(
+        (n) => n.nodeType === 3 && n.nodeValue.trim()
+      );
+      if (hasDirectText && depth > bestDepth) {
+        best = node;
+        bestDepth = depth;
+      }
+      for (const child of node.children || []) stack.push([child, depth + 1]);
+    }
+    return best;
+  }
+
+  function readNativeFont() {
+    for (const container of nativeCueElements()) {
+      const el = deepestTextBearer(container);
+      if (!el) continue;
+      const cs = getComputedStyle(el);
+      const size = parseFloat(cs.fontSize || "0");
+      if (!(size > 0)) continue;
+      nativeFont = { fontFamily: cs.fontFamily || "", fontSize: size };
+      return nativeFont;
+    }
+    // Between cues the container is empty and there is nothing to measure.
+    // Reuse the last good read rather than snapping to the fallback mid-line.
+    return nativeFont;
   }
 
   // Generic detection: find text rendered over a video element.
@@ -746,10 +835,19 @@
       const start = parseTimeVTT(m[1]);
       const end = parseTimeVTT(m[2]);
       if (!isFinite(start) || !isFinite(end)) continue;
+      // Strip cue tags, then decode the five escapes WebVTT actually defines
+      // (plus the bidi marks) — otherwise "&amp;" reaches the overlay verbatim
+      // and gets sent to the model as noise. TTML and json3 arrive already
+      // decoded via DOMParser / JSON.parse.
       const content = lines
         .slice(tli + 1)
         .join("\n")
         .replace(/<[^>]+>/g, "")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&[lr]rm;/g, "")
+        .replace(/&amp;/g, "&")
         .trim();
       if (content) out.push({ start, end, text: content });
     }
@@ -1161,6 +1259,29 @@
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area !== "sync") return;
     applySettings();
+  });
+
+  // The options page asks what the player is rendering right now, so it can
+  // show the live font regardless of which font mode is selected.
+  //
+  // Content scripts run in every frame (all_frames), and Chrome keeps only
+  // the first response. Frames with no player have nothing useful to say, so
+  // they stay silent and let the frame that actually holds the video answer.
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== "getNativeFont") return false;
+    const cueEls = nativeCueElements();
+    if (!cueEls.length && !getVideos().length) return false;
+    const font = readNativeFont();
+    sendResponse({
+      host: location.hostname,
+      platform: platform.name,
+      // Whether a cue is on screen this instant, or we're reporting the last
+      // good read from between lines.
+      live: cueEls.length > 0 && !!font,
+      fontFamily: font?.fontFamily || "",
+      fontSize: font?.fontSize || 0,
+    });
+    return false;
   });
 
   let lastHref = location.href;
