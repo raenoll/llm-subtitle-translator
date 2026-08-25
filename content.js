@@ -144,6 +144,10 @@
   const pending = new Map();
   let lastTranslationAt = 0;
   const MIN_INTERVAL_MS = 150;
+  // A dropped message callback leaves the promise unsettled forever, so its
+  // pending entry never clears and THAT LINE never translates again — a
+  // guaranteed missing subtitle. Bound it.
+  const TRANSLATE_TIMEOUT_MS = 25000;
   let lastLoggedText = null;
   let cueSetAt = 0;
   const STALE_CUE_MS = 10000; // force-clear if the same cue persists this long
@@ -714,6 +718,21 @@
     const promise = new Promise((resolve) => {
       const n = Math.max(0, settings?.contextLines ?? 0);
       const historySlice = n > 0 ? history.slice(-n) : [];
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        console.error(
+          DEBUG_PREFIX,
+          `translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
+          JSON.stringify(text)
+        );
+        finish("");
+      }, TRANSLATE_TIMEOUT_MS);
       chrome.runtime.sendMessage(
         {
           type: "translate",
@@ -728,7 +747,7 @@
               `translation runtime error after ${dt}ms:`,
               chrome.runtime.lastError.message
             );
-            resolve("");
+            finish("");
             return;
           }
           if (!resp?.ok) {
@@ -737,7 +756,7 @@
               `translation failed after ${dt}ms:`,
               resp?.error
             );
-            resolve("");
+            finish("");
             return;
           }
           const joined = resp.translations.join("\n");
@@ -760,7 +779,7 @@
               if (history.length > HISTORY_MAX) history.shift();
             }
           });
-          resolve(joined);
+          finish(joined);
         }
       );
     });
@@ -788,6 +807,7 @@
     if (text === currentOriginal) return;
     if (text && text !== lastLoggedText) {
       lastLoggedText = text;
+      domServed++;
       console.log(DEBUG_PREFIX, "detected cue:", text);
     } else if (!text && currentOriginal) {
       console.log(DEBUG_PREFIX, "cue cleared");
@@ -1131,13 +1151,63 @@
   // Time-based display: prefer pre-translated cues over DOM extraction when
   // available. Returns true if a cue was shown (and the DOM polling should
   // skip this tick).
+  // video.currentTime and the subtitle file's timestamps do not always share an
+  // origin (segment-relative times, presentationTimeOffset). When they differ,
+  // EVERY timeline lookup misses and playback falls back to translating each
+  // line live — which can never be on time. Measure the delta from lines we can
+  // actually see on screen, then apply it so the library drives the display.
+  let timelineOffset = 0;
+  let offsetLocked = false;
+  let offsetSamples = [];
+
+  function resetTimelineCalibration() {
+    timelineOffset = 0;
+    offsetLocked = false;
+    offsetSamples = [];
+  }
+
+  function calibrateTimeline(domText) {
+    if (offsetLocked || !domText || !cueList.length) return;
+    const videos = getVideos();
+    const video = videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
+    if (!video || !isFinite(video.currentTime)) return;
+    const key = normalize(domText);
+    // Only calibrate off a line that appears exactly once, so the sample is
+    // unambiguous.
+    const hits = cueList.filter((c) => normalize(c.text) === key);
+    if (hits.length !== 1) return;
+    const delta = video.currentTime - hits[0].start;
+    if (!isFinite(delta) || Math.abs(delta) > 3600) return;
+    offsetSamples.push(delta);
+    if (offsetSamples.length < 3) return;
+    const recent = offsetSamples.slice(-3);
+    const spread = Math.max(...recent) - Math.min(...recent);
+    if (spread > 1.0) {
+      // Samples disagree — keep only the newest and wait for a steadier read.
+      offsetSamples = recent.slice(-1);
+      return;
+    }
+    timelineOffset = recent.slice().sort((a, b) => a - b)[1];
+    offsetLocked = true;
+    console.log(
+      DEBUG_PREFIX,
+      `timeline calibrated: cue times are offset by ${timelineOffset.toFixed(2)}s ` +
+        `from video.currentTime — pre-translated cues can now drive the display`
+    );
+  }
+
+  // How each displayed line was served. If domServed keeps climbing, the
+  // pre-translation path is not doing its job and lines will run late.
+  let timelineServed = 0;
+  let domServed = 0;
+
   function tickTimeSyncDisplay() {
     if (!cueList.length) return false;
     const videos = getVideos();
     if (!videos.length) return false;
     const video = videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
     if (!isFinite(video.currentTime)) return false;
-    const t = video.currentTime;
+    const t = video.currentTime - timelineOffset;
     // Linear scan is fine (< a few hundred cues per segment window).
     // Pick the latest cue whose range contains t.
     let match = null;
@@ -1172,6 +1242,7 @@
       return false;
     }
     if (match.text !== currentOriginal) {
+      timelineServed++;
       console.log(DEBUG_PREFIX, "sync cue:", match.text);
       lastLoggedText = match.text;
       currentOriginal = match.text;
@@ -1209,6 +1280,8 @@
       `diag: videos=${videos.length} playing=${playingVideos.length} ` +
         `platformMatches=[${platformMatches.join("; ") || "none"}] ` +
         `capturedCues=${cueList.length} preTranslated=${translatedCount} ` +
+        `servedByTimeline=${timelineServed} servedLive=${domServed} ` +
+        `timelineOffset=${offsetLocked ? timelineOffset.toFixed(2) + "s" : "未校准"} ` +
         `lastCapture=${lastCueCaptureAt ? `${Math.round((Date.now() - lastCueCaptureAt) / 1000)}s ago` : "never"} ` +
         `lastCue=${JSON.stringify(currentOriginal || "")}`
     );
@@ -1227,6 +1300,9 @@
       // nativeCueElements() is memoized, so this shares the DOM walk that
       // extractSubtitle() just did and costs nothing extra.
       if (settings?.fontSizeSource === "platform") readNativeFont();
+      // Learn the offset between the file's timestamps and video.currentTime
+      // from lines we can see, so the timeline path stops missing.
+      calibrateTimeline(text);
       handleCueChange(text);
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
@@ -1313,10 +1389,30 @@
     return false;
   });
 
-  let lastHref = location.href;
+  // Which VIDEO the URL refers to — deliberately not the whole href. Players
+  // rewrite their URL during playback (Amazon appends /ref=… as a path segment,
+  // plus autoplay and resume-position params). Treating that as a new video
+  // wipes the pre-translated cue library, and the subtitle file is NOT fetched
+  // again because the player already holds it — so the library stays empty for
+  // the rest of the episode and every line degrades to slow live translation.
+  const TITLE_ID_PARAMS = ["v", "gti", "asin", "titleId", "contentId", "episodeId"];
+
+  function videoIdentity() {
+    let search = "";
+    try {
+      const params = new URLSearchParams(location.search);
+      search = TITLE_ID_PARAMS.map((k) => params.get(k)).filter(Boolean).join(",");
+    } catch (_) {}
+    const path = location.pathname.replace(/\/ref=[^/]*/gi, "").replace(/\/+$/, "");
+    return `${path}${search ? `?${search}` : ""}`;
+  }
+
+  let lastVideoId = videoIdentity();
   setInterval(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
+    const id = videoIdentity();
+    if (id !== lastVideoId) {
+      lastVideoId = id;
+      resetTimelineCalibration();
       currentOriginal = "";
       currentTranslated = "";
       lastLoggedText = null;
@@ -1326,7 +1422,7 @@
       sessionLanguage = null; // new video may be a different language
       console.log(
         DEBUG_PREFIX,
-        `navigation detected (${location.pathname}); re-evaluating`
+        `new video detected (${id}); cue library cleared, re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
       // and back should toggle the observer on/off accordingly.

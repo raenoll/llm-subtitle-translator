@@ -50,6 +50,28 @@ const DEFAULT_SETTINGS = {
   textBgOpacity: 35, // percent, 0-90
 };
 
+// Hard deadline for every outbound request. Without one, a stalled provider
+// connection never settles: translate() never resolves, sendResponse is never
+// called, and the content script's pending entry for that cue wedges forever —
+// that line then silently never translates again, not even on replay.
+const REQUEST_TIMEOUT_MS = 20000;
+
+async function fetchWithTimeout(url, options = {}) {
+  try {
+    // globalThis.fetch, never this wrapper — a blanket rewrite of the call
+    // sites once turned this line into infinite recursion.
+    return await globalThis.fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无响应）`);
+    }
+    throw err;
+  }
+}
+
 const PROVIDER_DEFAULT_MODEL = {
   gemini: "gemini-2.5-flash",
   openai: "gpt-4o-mini",
@@ -192,7 +214,7 @@ async function callGemini({ apiKey, model, system, user, temperature }) {
       responseMimeType: "text/plain",
     },
   };
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -224,7 +246,7 @@ async function callOpenAICompatible({
       { role: "user", content: user },
     ],
   };
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -249,7 +271,7 @@ async function callGoogleTranslate({ apiKey, targetCode, lines }) {
     target: targetCode,
     format: "text",
   };
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -338,7 +360,7 @@ async function getV3AccessToken(serviceAccountJson) {
   );
   const jwt = `${signingInput}.${b64urlEncode(new Uint8Array(sigBuf))}`;
 
-  const tokRes = await fetch("https://oauth2.googleapis.com/token", {
+  const tokRes = await fetchWithTimeout("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body:
@@ -393,7 +415,7 @@ async function callGoogleTranslateV3({
       ? m
       : `projects/${projectId}/locations/${loc}/models/${m}`;
   }
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -413,7 +435,7 @@ async function callGoogleTranslateV3({
 }
 
 async function callAnthropic({ apiKey, model, system, user, temperature }) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
