@@ -176,25 +176,38 @@
 
   function detectLang(text) {
     if (!text) return "other";
-    // Strong signals — these uniquely identify a language.
-    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
+    const count = (re) => (text.match(re) || []).length;
+    const kana = count(/[\u3040-\u309F\u30A0-\u30FF]/g);
+    const hangul = count(/[\uAC00-\uD7AF]/g);
+    const cyrillic = count(/[\u0400-\u04FF]/g);
+    const greek = count(/[\u0370-\u03FF]/g);
+    const cjk = count(/[\u4E00-\u9FFF]/g);
+    const latin = count(/[A-Za-z]/g);
+    // Compare each script against HALF the Latin count, not against its mere
+    // presence. One ideograph carries roughly as much text as two Latin
+    // letters, and — crucially — a lone Chinese name or on-screen sign inside
+    // an English line must not reclassify the whole line. Getting that wrong
+    // sends the cue down the skip-translation path, which stands the overlay
+    // down and flashes the untranslated native subtitle.
+    const latinWeight = latin / 2;
+    if (kana > 0 && kana >= latinWeight) {
       setSessionLanguage("日本語");
       return "日本語";
     }
-    if (/[\uAC00-\uD7AF]/.test(text)) {
+    if (hangul > 0 && hangul >= latinWeight) {
       setSessionLanguage("한국어");
       return "한국어";
     }
-    if (/[\u0400-\u04FF]/.test(text)) {
+    if (cyrillic > 0 && cyrillic >= latinWeight) {
       setSessionLanguage("Русский");
       return "Русский";
     }
-    if (/[\u0370-\u03FF]/.test(text)) {
+    if (greek > 0 && greek >= latinWeight) {
       setSessionLanguage("Ελληνικά");
       return "Ελληνικά";
     }
-    // CJK-only — ambiguous between Chinese and Japanese.
-    if (/[\u4E00-\u9FFF]/.test(text)) {
+    // CJK-dominant — ambiguous between Chinese and Japanese.
+    if (cjk > 0 && cjk >= latinWeight) {
       // If the session has already been firmly identified as Japanese /
       // Korean (via an earlier line or the subtitle file's xml:lang), trust
       // that over a naive Chinese classification.
@@ -202,7 +215,7 @@
       if (sessionLanguage === "한국어") return "한국어";
       return TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
     }
-    if (/[A-Za-z]/.test(text)) {
+    if (latin > 0) {
       // Latin is ambiguous between English / Spanish / French / German etc.;
       // we only set session when no prior stronger signal exists.
       if (!sessionLanguage) setSessionLanguage("English");
@@ -493,17 +506,34 @@
     return els;
   }
 
+  // Our own overlay must never be read back as a native cue. Loose platform
+  // selectors like [class*='subtitle'] (HBO Max, Apple TV+) match our
+  // llm-subtitle-* classes, and picking our own translation back up creates a
+  // feedback loop: the translated Chinese is detected as a skip-list language,
+  // renderOverlay stands down, and the untranslated native line flashes up.
+  function isOwnOverlay(el) {
+    if (!el) return false;
+    if (el.id === "llm-subtitle-overlay") return true;
+    return typeof el.closest === "function"
+      ? !!el.closest("#llm-subtitle-overlay")
+      : false;
+  }
+
   function collectNativeCueElements() {
     if (!platform.containerSelectors.length) return [];
     const joined = platform.containerSelectors.join(", ");
     const all = [];
     try {
-      document.querySelectorAll(joined).forEach((el) => all.push(el));
+      document.querySelectorAll(joined).forEach((el) => {
+        if (!isOwnOverlay(el)) all.push(el);
+      });
     } catch (_) {}
     for (const el of walkAllElements(document)) {
       if (el.shadowRoot) {
         try {
-          el.shadowRoot.querySelectorAll(joined).forEach((x) => all.push(x));
+          el.shadowRoot.querySelectorAll(joined).forEach((x) => {
+            if (!isOwnOverlay(x)) all.push(x);
+          });
         } catch (_) {}
       }
     }
