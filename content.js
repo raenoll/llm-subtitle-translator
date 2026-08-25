@@ -505,27 +505,59 @@
     positionOverlayToVideo();
   }
 
+  // Roots we have planted the hide rule into, so it can be lifted again.
+  const hideStyleRoots = new Set();
+
+  function findHideStyle(root, styleId) {
+    return root.getElementById
+      ? root.getElementById(styleId)
+      : root.querySelector?.(`#${styleId}`) || null;
+  }
+
   function hideNativeSubtitles(on) {
     const styleId = "llm-subtitle-hide-native";
-    let el = document.getElementById(styleId);
     if (!on) {
-      if (el) {
-        el.remove();
-        log("native subtitles UN-HIDDEN — raw source is now visible");
+      let removed = 0;
+      for (const root of hideStyleRoots) {
+        const el = findHideStyle(root, styleId);
+        if (el) {
+          el.remove();
+          removed++;
+        }
       }
+      hideStyleRoots.clear();
+      if (removed) log("native subtitles UN-HIDDEN — raw source is now visible");
       return;
     }
-    if (el) return;
-    el = document.createElement("style");
-    el.id = styleId;
     const selectors = platform.containerSelectors.filter(Boolean).join(", ");
-    // Use opacity so the native subtitle's background box disappears too
-    // (Disney+ renders an opaque black box behind its cues).
-    el.textContent = selectors
-      ? `${selectors} { opacity: 0 !important; }`
-      : "";
-    document.documentElement.appendChild(el);
-    log("native subtitles hidden");
+    if (!selectors) return;
+    // A <style> in the document cannot cross a shadow boundary. extractSubtitle
+    // walks shadow roots to FIND cues, so a player that renders captions inside
+    // one is detected but was never actually hidden — the raw source line stayed
+    // fully visible. Plant the rule in every root that holds a cue as well.
+    const roots = new Set([document]);
+    for (const el of nativeCueElements()) {
+      const root = el.getRootNode?.();
+      if (root && root !== document && root.host) roots.add(root);
+    }
+    for (const root of roots) {
+      if (findHideStyle(root, styleId)) {
+        hideStyleRoots.add(root);
+        continue;
+      }
+      const el = document.createElement("style");
+      el.id = styleId;
+      // Use opacity so the native subtitle's background box disappears too
+      // (Disney+ renders an opaque black box behind its cues).
+      el.textContent = `${selectors} { opacity: 0 !important; }`;
+      (root === document ? document.documentElement : root).appendChild(el);
+      hideStyleRoots.add(root);
+      log(
+        root === document
+          ? "native subtitles hidden"
+          : "native subtitles hidden (inside a shadow root)"
+      );
+    }
   }
 
   // -------------- DOM helpers --------------
