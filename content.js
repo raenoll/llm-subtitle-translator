@@ -175,16 +175,59 @@
   // Chinese and Japanese. Distinct such lines seen so far this session; once
   // enough have gone by with no kana anywhere, the track really is Chinese.
   const cjkAmbiguousSeen = new Set();
-  const CJK_SETTLE_LINES = 3;
+  const CJK_SETTLE_LINES = 6;
+  // Cues whose "translation" is just their own text, because they were judged
+  // to be in a skip-list language. That judgement can be overturned later — a
+  // single kana line proves a kanji-only track is Japanese, not Chinese — so
+  // it has to be undoable. Left permanent, those cues render raw source
+  // forever, long after detection has corrected itself.
+  const skipMarkedKeys = new Set();
+  // Whole-track evidence beats any single line: if ANY captured cue contains
+  // kana, the track is Japanese, so a kanji-only line in it is Japanese too.
+  let kanaEvidence = { at: -1, value: false };
   // Deliberately not a plausible skip-list entry: an unsettled CJK line must
   // never match the skip list.
   const CJK_UNDECIDED = "CJK（待定）";
 
   function setSessionLanguage(lang) {
     if (lang && sessionLanguage !== lang) {
+      const previous = sessionLanguage;
       sessionLanguage = lang;
       console.log(DEBUG_PREFIX, "session language:", lang);
+      // Anything skipped under the old guess has to be re-judged.
+      if (previous) revokeSkipMarks();
     }
+  }
+
+  function revokeSkipMarks() {
+    if (!skipMarkedKeys.size) return;
+    let undone = 0;
+    for (const c of cueLibrary.values()) {
+      if (skipMarkedKeys.has(normalize(c.text)) && c.translation === c.text) {
+        c.translation = null;
+        undone++;
+      }
+    }
+    for (const key of skipMarkedKeys) cache.delete(key);
+    skipMarkedKeys.clear();
+    log(
+      `session language changed — re-queued ${undone} cue(s) previously ` +
+        `skipped under the old guess`
+    );
+    if (undone) scheduleBatchTranslation();
+  }
+
+  function trackHasKana() {
+    if (kanaEvidence.at === lastCueCaptureAt) return kanaEvidence.value;
+    let found = false;
+    for (const c of cueLibrary.values()) {
+      if (/[\u3040-\u309F\u30A0-\u30FF]/.test(c.text)) {
+        found = true;
+        break;
+      }
+    }
+    kanaEvidence = { at: lastCueCaptureAt, value: found };
+    return found;
   }
 
   function detectLang(text) {
@@ -226,6 +269,13 @@
       // over a naive per-line classification.
       if (sessionLanguage === "日本語") return "日本語";
       if (sessionLanguage === "한국어") return "한국어";
+      // A kanji-only line inside a track that contains kana anywhere is
+      // Japanese. This is far stronger than counting lines, and it is exactly
+      // the case that was mislabelling Japanese subtitles as Chinese.
+      if (trackHasKana()) {
+        setSessionLanguage("日本語");
+        return "日本語";
+      }
       const zh = TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
       if (sessionLanguage === "简体中文" || sessionLanguage === "繁體中文") {
         return zh;
@@ -1108,8 +1158,10 @@
         for (const c of cueList) {
           if (!cueMatchesActiveTrack(c)) continue;
           if (c.translation === null && shouldSkipTranslation(c.text)) {
+            const k = normalize(c.text);
             c.translation = c.text;
-            cache.set(normalize(c.text), c.text);
+            cache.set(k, c.text);
+            skipMarkedKeys.add(k);
           }
         }
         const pool = cueList.filter(
@@ -1467,6 +1519,8 @@
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
       cjkAmbiguousSeen.clear();
+      skipMarkedKeys.clear();
+      kanaEvidence = { at: -1, value: false };
       console.log(
         DEBUG_PREFIX,
         `navigation detected (${location.pathname}); re-evaluating`
