@@ -34,6 +34,11 @@ const DEFAULT_SETTINGS = {
   contextLines: 0,
   debug: false,
   fontFamily: "",
+  // 400 (Regular). The old hardcoded 700 resolved to Semibold 600 — PingFang
+  // SC's heaviest real face — which is a lot of ink for subtitles. Measured on
+  // macOS, 400 paints ~24% less than 600 while the outline and backdrop keep
+  // the contrast. Adjustable per user.
+  fontWeight: 400,
   // Only the size can follow the player: "platform" reads the size off the
   // site's own cues, "custom" uses fontSize below. The family is never
   // inherited — a Western caption font has no CJK glyphs to lend.

@@ -382,10 +382,15 @@
         );
       }
     }
+    // Weight: the original row sits one step lighter than the translation,
+    // mirroring how the sizes relate.
+    const weight = Math.max(100, Math.min(700, Number(settings.fontWeight) || 400));
     tEl.style.fontFamily = famOut;
     tEl.style.fontSize = sizeOut > 0 ? `${sizeOut}px` : "";
+    tEl.style.fontWeight = String(weight);
     oEl.style.fontFamily = famOut;
     oEl.style.fontSize = sizeOut > 0 ? `${Math.round(sizeOut * 0.65)}px` : "";
+    oEl.style.fontWeight = String(Math.max(100, weight - 100));
     // Hide an empty row outright. A row with no text still paints its padding
     // and backdrop, which shows up as a stray black sliver while a cue waits
     // for its translation to come back.

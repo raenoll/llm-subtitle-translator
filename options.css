@@ -343,7 +343,7 @@ input[type="range"] {
 }
 .preview-translated {
   color: #fff;
-  font-weight: 700;
+  font-weight: 500; /* overridden inline from the 字重 setting */
   line-height: 1.25;
   text-shadow:
     -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000,
@@ -351,7 +351,7 @@ input[type="range"] {
 }
 .preview-original {
   color: #dedede;
-  font-weight: 500;
+  font-weight: 400; /* overridden inline from the 字重 setting */
   line-height: 1.2;
   text-shadow:
     -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000,

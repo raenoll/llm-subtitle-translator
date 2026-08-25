@@ -22,7 +22,9 @@
 #llm-subtitle-overlay .llm-subtitle-translated {
   color: #fff;
   font-size: 2.1rem;
-  font-weight: 700;
+  /* Overridden inline from the user's setting. See DEFAULT_SETTINGS for why
+     this is no longer 700. */
+  font-weight: 400;
   line-height: 1.25;
   text-shadow:
     -2px -2px 0 #000,

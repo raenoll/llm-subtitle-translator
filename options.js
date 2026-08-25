@@ -50,6 +50,7 @@ async function load() {
   $("debug").checked = !!s.debug;
   applyFontSizeMode(s.fontSizeSource || "custom");
   $("fontFamily").value = s.fontFamily || "";
+  $("fontWeight").value = String(s.fontWeight ?? 400);
   $("fontSize").value = s.fontSize ?? 32;
   $("googleProjectId").value = s.googleProjectId || "";
   $("googleLocation").value = s.googleLocation || "us-central1";
@@ -180,8 +181,11 @@ function updateStylePreview() {
     ? nativeFontReading.fontSize
     : Number($("fontSize").value) || 32;
   const px = Math.max(12, Math.min(34, rawSize * 0.7));
+  const weight = Number($("fontWeight").value) || 400;
   const t = $("previewTranslated");
   const o = $("previewOriginal");
+  t.style.fontWeight = String(weight);
+  o.style.fontWeight = String(Math.max(100, weight - 100));
   t.style.fontFamily = fam || "";
   t.style.fontSize = `${px}px`;
   t.style.background = bg;
@@ -235,9 +239,9 @@ function bindText(id, key, parse = (v) => v) {
   });
 }
 
-function bindSelect(id, key) {
+function bindSelect(id, key, parse = (v) => v) {
   $(id).addEventListener("change", (e) => {
-    saveField(key, e.target.value);
+    saveField(key, parse(e.target.value));
     if (id === "provider") applyProviderSwap();
   });
 }
@@ -304,6 +308,7 @@ bindCheckbox("showOriginal", "showOriginal");
 bindCheckbox("enabled", "enabled");
 bindCheckbox("debug", "debug");
 bindText("fontFamily", "fontFamily");
+bindSelect("fontWeight", "fontWeight", (v) => Number(v));
 bindText("fontSize", "fontSize", (v) => Number(v));
 bindText("googleProjectId", "googleProjectId");
 bindText("googleLocation", "googleLocation");
@@ -312,6 +317,7 @@ bindText("textBgOpacity", "textBgOpacity", (v) => Number(v));
 
 for (const id of [
   "fontFamily",
+  "fontWeight",
   "fontSize",
   "textBgEnabled",
   "textBgOpacity",

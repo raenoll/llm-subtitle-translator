@@ -204,6 +204,23 @@
           </small>
         </div>
         <div class="row">
+          <label>字重</label>
+          <select id="fontWeight">
+            <option value="100">100 极细</option>
+            <option value="200">200 纤细</option>
+            <option value="300">300 细体</option>
+            <option value="400">400 常规（默认）</option>
+            <option value="500">500 中粗</option>
+            <option value="600">600 中黑</option>
+            <option value="700">700 粗体</option>
+          </select>
+          <small class="hint">
+            嫌字太粗就往下调。PingFang SC 等多数中文黑体<strong>最重只到 600</strong>，
+            选 700 只会落回 600，不会更粗。以 600 为基准实测的墨量：
+            500 ≈ 94%、400 ≈ 76%、300 ≈ 44%、100 ≈ 34%。原文行会自动比译文轻一档。
+          </small>
+        </div>
+        <div class="row">
           <label>保留当前字号</label>
           <label class="switch">
             <input id="fontSizeInherit" type="checkbox" />
