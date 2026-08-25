@@ -1022,7 +1022,18 @@
     return out;
   }
 
-  function ingestParsedCues(cues) {
+  // `lang` is the language of the file these cues came from, when the file
+  // said so. A title can carry several subtitle tracks and the player may
+  // fetch more than the one the viewer picked, so cues have to stay
+  // attributable to their track instead of all landing in one anonymous pool.
+  // A cue belongs to the track being watched unless its file said otherwise.
+  // Cues with no known language are always allowed — we cannot rule them out.
+  function cueMatchesActiveTrack(c) {
+    if (!c.lang || !sessionLanguage) return true;
+    return c.lang === sessionLanguage;
+  }
+
+  function ingestParsedCues(cues, lang) {
     if (!cues.length) return 0;
     let added = 0;
     for (const c of cues) {
@@ -1032,6 +1043,7 @@
         start: c.start,
         end: c.end,
         text: c.text,
+        lang: lang || null,
         translation: null,
         translating: false,
       });
@@ -1057,13 +1069,17 @@
         // Mark them as "translated" with their source text so time-sync /
         // cache hits display them immediately.
         for (const c of cueList) {
+          if (!cueMatchesActiveTrack(c)) continue;
           if (c.translation === null && shouldSkipTranslation(c.text)) {
             c.translation = c.text;
             cache.set(normalize(c.text), c.text);
           }
         }
         const pool = cueList.filter(
-          (c) => c.translation === null && !c.translating
+          (c) =>
+            c.translation === null &&
+            !c.translating &&
+            cueMatchesActiveTrack(c)
         );
         if (!pool.length) break;
         const videos = getVideos();
@@ -1148,29 +1164,32 @@
     if (typeof d.text !== "string") return;
     const text = String(d.text || "");
     let cues = [];
+    let fileLang = null;
     if (text.startsWith("WEBVTT")) cues = parseWebVTT(text);
     else if (/<tt[\s>]/i.test(text)) {
       cues = parseTTML(text);
-      // TTML carries the source language in xml:lang — use it as an
-      // authoritative hint so kanji-only Japanese lines aren't mis-classified
-      // as Chinese later on.
+      // TTML carries its language in xml:lang. This describes THIS FILE only —
+      // it must not be promoted to the session language, because the player
+      // also fetches tracks the viewer did not select, and letting a
+      // background prefetch redefine the session makes every later per-cue
+      // decision (skip list, kanji disambiguation) wrong.
       const langMatch =
         text.match(/xml:lang="([^"]+)"/i) || text.match(/\slang="([^"]+)"/i);
-      const display = langMatch ? langCodeToDisplay(langMatch[1]) : null;
-      if (display) setSessionLanguage(display);
+      fileLang = langMatch ? langCodeToDisplay(langMatch[1]) : null;
     } else if (/^\s*\{\s*"(wireMagic|events)"/.test(text)) {
       cues = parseYouTubeJSON3(text);
     } else if (/<transcript/i.test(text.slice(0, 200))) {
       cues = parseYouTubeXML(text);
     }
-    // YouTube embeds the source language in the timedtext URL (`&lang=ja` etc.)
-    if (!sessionLanguage && d.url) {
-      const m = d.url.match(/[?&]lang=([a-zA-Z-]+)/);
-      const display = m ? langCodeToDisplay(m[1]) : null;
-      if (display) setSessionLanguage(display);
+    // Subtitle URLs often name the track's language (`&lang=ja`, `.ja.vtt`).
+    if (!fileLang && d.url) {
+      const m =
+        d.url.match(/[?&]lang=([a-zA-Z-]+)/) ||
+        d.url.match(/[._-]([a-z]{2}(?:-[A-Za-z]{2,4})?)\.(?:vtt|ttml|dfxp|srt)/i);
+      fileLang = m ? langCodeToDisplay(m[1]) : null;
     }
     if (cues.length) {
-      const added = ingestParsedCues(cues);
+      const added = ingestParsedCues(cues, fileLang);
       const sample = cues[0];
       console.log(
         DEBUG_PREFIX,
@@ -1196,7 +1215,9 @@
     let match = null;
     for (const c of cueList) {
       if (c.start <= t && t <= c.end) {
-        match = c;
+        // With two tracks in the library, the same timestamp matches a cue in
+        // each. Only the watched track may be displayed.
+        if (cueMatchesActiveTrack(c)) match = c;
       } else if (c.start > t) {
         break;
       }
