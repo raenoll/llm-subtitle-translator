@@ -144,21 +144,6 @@
   const pending = new Map();
   let lastTranslationAt = 0;
   const MIN_INTERVAL_MS = 150;
-  // Most recent reply that came back still in the source language, surfaced
-  // by the diagnostics panel.
-  let lastUntranslated = null;
-  // Subtitle-shaped requests the page made, recorded by inject.js. Lets the
-  // diagnostics panel show WHY nothing was captured instead of guessing.
-  const captureCandidates = [];
-  // How often a translation arrived too late to be shown, and how many lines
-  // the model failed to translate — the two ways a line ends up blank.
-  let droppedLate = 0;
-  let droppedUntranslated = 0;
-  // Safety net for the message round trip. The service worker bounds its own
-  // network calls, but if it is torn down mid-flight the callback can simply
-  // never fire. An unsettled promise never runs its .finally(), so the pending
-  // entry for that cue would wedge and the line would stay silent forever.
-  const TRANSLATE_TIMEOUT_MS = 25000;
   let lastLoggedText = null;
   let cueSetAt = 0;
   const STALE_CUE_MS = 10000; // force-clear if the same cue persists this long
@@ -181,129 +166,43 @@
   // captured subtitle file), and fall back to it for ambiguous lines.
   const TRADITIONAL_MARKERS = /[繁體國學愛們會個時這萬對發頭來說麼這個話請過點時當開關長無師寫聽車馬龍樓嗎見讀書現實內對應動進經濟經過機構參與飛錢麵]/;
   let sessionLanguage = null; // reset on navigation
-  // Kanji-only lines ("大丈夫", "準備完了") are genuinely ambiguous between
-  // Chinese and Japanese. Distinct such lines seen so far this session; once
-  // enough have gone by with no kana anywhere, the track really is Chinese.
-  const cjkAmbiguousSeen = new Set();
-  const CJK_SETTLE_LINES = 6;
-  // Cues whose "translation" is just their own text, because they were judged
-  // to be in a skip-list language. That judgement can be overturned later — a
-  // single kana line proves a kanji-only track is Japanese, not Chinese — so
-  // it has to be undoable. Left permanent, those cues render raw source
-  // forever, long after detection has corrected itself.
-  const skipMarkedKeys = new Set();
-  // Whole-track evidence beats any single line: if ANY captured cue contains
-  // kana, the track is Japanese, so a kanji-only line in it is Japanese too.
-  let kanaEvidence = { at: -1, value: false };
-  // Deliberately not a plausible skip-list entry: an unsettled CJK line must
-  // never match the skip list.
-  const CJK_UNDECIDED = "CJK（待定）";
 
   function setSessionLanguage(lang) {
     if (lang && sessionLanguage !== lang) {
-      const previous = sessionLanguage;
       sessionLanguage = lang;
       console.log(DEBUG_PREFIX, "session language:", lang);
-      // Anything skipped under the old guess has to be re-judged.
-      if (previous) revokeSkipMarks();
     }
-  }
-
-  function revokeSkipMarks() {
-    if (!skipMarkedKeys.size) return;
-    let undone = 0;
-    for (const c of cueLibrary.values()) {
-      if (skipMarkedKeys.has(normalize(c.text)) && c.translation === c.text) {
-        c.translation = null;
-        undone++;
-      }
-    }
-    for (const key of skipMarkedKeys) cache.delete(key);
-    skipMarkedKeys.clear();
-    log(
-      `session language changed — re-queued ${undone} cue(s) previously ` +
-        `skipped under the old guess`
-    );
-    if (undone) scheduleBatchTranslation();
-  }
-
-  function trackHasKana() {
-    if (kanaEvidence.at === lastCueCaptureAt) return kanaEvidence.value;
-    let found = false;
-    for (const c of cueLibrary.values()) {
-      if (/[\u3040-\u309F\u30A0-\u30FF]/.test(c.text)) {
-        found = true;
-        break;
-      }
-    }
-    kanaEvidence = { at: lastCueCaptureAt, value: found };
-    return found;
   }
 
   function detectLang(text) {
     if (!text) return "other";
-    const count = (re) => (text.match(re) || []).length;
-    const kana = count(/[\u3040-\u309F\u30A0-\u30FF]/g);
-    const hangul = count(/[\uAC00-\uD7AF]/g);
-    const cyrillic = count(/[\u0400-\u04FF]/g);
-    const greek = count(/[\u0370-\u03FF]/g);
-    const cjk = count(/[\u4E00-\u9FFF]/g);
-    const latin = count(/[A-Za-z]/g);
-    // Compare each script against HALF the Latin count, not against its mere
-    // presence. One ideograph carries roughly as much text as two Latin
-    // letters, and — crucially — a lone Chinese name or on-screen sign inside
-    // an English line must not reclassify the whole line. Getting that wrong
-    // sends the cue down the skip-translation path, which stands the overlay
-    // down and flashes the untranslated native subtitle.
-    const latinWeight = latin / 2;
-    if (kana > 0 && kana >= latinWeight) {
+    // Strong signals — these uniquely identify a language.
+    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
       setSessionLanguage("日本語");
       return "日本語";
     }
-    if (hangul > 0 && hangul >= latinWeight) {
+    if (/[\uAC00-\uD7AF]/.test(text)) {
       setSessionLanguage("한국어");
       return "한국어";
     }
-    if (cyrillic > 0 && cyrillic >= latinWeight) {
+    if (/[\u0400-\u04FF]/.test(text)) {
       setSessionLanguage("Русский");
       return "Русский";
     }
-    if (greek > 0 && greek >= latinWeight) {
+    if (/[\u0370-\u03FF]/.test(text)) {
       setSessionLanguage("Ελληνικά");
       return "Ελληνικά";
     }
-    // CJK-dominant — ambiguous between Chinese and Japanese.
-    if (cjk > 0 && cjk >= latinWeight) {
-      // If the session has already been firmly identified (via an earlier
-      // line's kana / hangul, or the subtitle file's xml:lang), trust that
-      // over a naive per-line classification.
+    // CJK-only — ambiguous between Chinese and Japanese.
+    if (/[\u4E00-\u9FFF]/.test(text)) {
+      // If the session has already been firmly identified as Japanese /
+      // Korean (via an earlier line or the subtitle file's xml:lang), trust
+      // that over a naive Chinese classification.
       if (sessionLanguage === "日本語") return "日本語";
       if (sessionLanguage === "한국어") return "한국어";
-      // A kanji-only line inside a track that contains kana anywhere is
-      // Japanese. This is far stronger than counting lines, and it is exactly
-      // the case that was mislabelling Japanese subtitles as Chinese.
-      if (trackHasKana()) {
-        setSessionLanguage("日本語");
-        return "日本語";
-      }
-      const zh = TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
-      if (sessionLanguage === "简体中文" || sessionLanguage === "繁體中文") {
-        return zh;
-      }
-      // Nothing has settled the track's language yet. Guessing "Chinese" here
-      // is the expensive mistake: Chinese is in the default skip list, so the
-      // cue takes the stand-down path and the raw untranslated source line is
-      // shown. Guessing the other way costs one redundant API call. So stay
-      // undecided — and therefore translate — until several distinct
-      // kanji-only lines have gone by without a single kana appearing.
-      cjkAmbiguousSeen.add(normalize(text));
-      if (cjkAmbiguousSeen.size >= CJK_SETTLE_LINES) {
-        setSessionLanguage(zh);
-        return zh;
-      }
-      return CJK_UNDECIDED;
+      return TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
     }
-    if (latin > 0) {
+    if (/[A-Za-z]/.test(text)) {
       // Latin is ambiguous between English / Spanish / French / German etc.;
       // we only set session when no prior stronger signal exists.
       if (!sessionLanguage) setSessionLanguage("English");
@@ -330,23 +229,6 @@
     if (c.startsWith("zh")) return "简体中文";
     if (c.startsWith("en")) return "English";
     return null;
-  }
-
-  // A model sometimes hands back text still in the source language — an exact
-  // copy, or a near-copy with a character altered ("そうだ" → "そうか"). Byte
-  // equality misses the near-copies, so check the SCRIPT instead: a Chinese
-  // translation cannot legitimately contain kana or hangul.
-  function translationLooksUntranslated(translation, target) {
-    if (!translation) return false;
-    const t = String(target || "");
-    const kana = /[\u3040-\u309F\u30A0-\u30FF]/.test(translation);
-    const hangul = /[\uAC00-\uD7AF]/.test(translation);
-    const cjk = /[\u4E00-\u9FFF]/.test(translation);
-    if (/中文|Chinese|^zh/i.test(t)) return kana || hangul;
-    if (/English|英语|英文|^en/i.test(t)) return kana || hangul || cjk;
-    if (/Русский|Russian|^ru/i.test(t)) return kana || hangul || cjk;
-    // Targets that legitimately use these scripts, or ones we can't judge.
-    return false;
   }
 
   function shouldSkipTranslation(text) {
@@ -444,10 +326,6 @@
     const isSkipping =
       currentOriginal && shouldSkipTranslation(currentOriginal);
     if (isSkipping) {
-      log(
-        `standing down: cue detected as ${detectLang(currentOriginal)}, ` +
-          `which is in the skip list — showing the native subtitle instead`
-      );
       if (overlay) overlay.style.display = "none";
       hideNativeSubtitles(false);
       return;
@@ -521,12 +399,6 @@
     // hide the original row so the same line isn't shown twice.
     const duplicated =
       currentTranslated && currentTranslated === currentOriginal;
-    if (duplicated) {
-      log(
-        "translation is identical to the source — our overlay is painting the " +
-          "original text (this is NOT the native subtitle showing through)"
-      );
-    }
     oEl.style.display =
       settings.showOriginal && currentOriginal && !duplicated
         ? "block"
@@ -538,78 +410,23 @@
     positionOverlayToVideo();
   }
 
-  // Roots we have planted the hide rule into, so it can be lifted again.
-  const hideStyleRoots = new Set();
-
-  function findHideStyle(root, styleId) {
-    return root.getElementById
-      ? root.getElementById(styleId)
-      : root.querySelector?.(`#${styleId}`) || null;
-  }
-
   function hideNativeSubtitles(on) {
     const styleId = "llm-subtitle-hide-native";
+    let el = document.getElementById(styleId);
     if (!on) {
-      let removed = 0;
-      for (const root of hideStyleRoots) {
-        const el = findHideStyle(root, styleId);
-        if (el) {
-          el.remove();
-          removed++;
-        }
-      }
-      hideStyleRoots.clear();
-      if (removed) log("native subtitles UN-HIDDEN — raw source is now visible");
+      if (el) el.remove();
       return;
     }
+    if (el) return;
+    el = document.createElement("style");
+    el.id = styleId;
     const selectors = platform.containerSelectors.filter(Boolean).join(", ");
-    if (!selectors) return;
-    // A <style> in the document cannot cross a shadow boundary. extractSubtitle
-    // walks shadow roots to FIND cues, so a player that renders captions inside
-    // one is detected but was never actually hidden — the raw source line stayed
-    // fully visible. Plant the rule in every root that holds a cue as well.
-    const roots = new Set([document]);
-    for (const el of nativeCueElements()) {
-      const root = el.getRootNode?.();
-      if (root && root !== document && root.host) roots.add(root);
-    }
-    for (const root of roots) {
-      if (findHideStyle(root, styleId)) {
-        hideStyleRoots.add(root);
-        continue;
-      }
-      const el = document.createElement("style");
-      el.id = styleId;
-      // Use opacity so the native subtitle's background box disappears too
-      // (Disney+ renders an opaque black box behind its cues).
-      el.textContent = `${selectors} { opacity: 0 !important; }`;
-      (root === document ? document.documentElement : root).appendChild(el);
-      hideStyleRoots.add(root);
-      log(
-        root === document
-          ? "native subtitles hidden"
-          : "native subtitles hidden (inside a shadow root)"
-      );
-    }
-    // Verify the OUTCOME, not merely that the rule was injected. A <style>
-    // that cannot reach the cue fails completely silently — that is exactly
-    // how the shadow-DOM case went unnoticed for so long. Runs only on the
-    // injection path, so it is not a per-tick cost.
-    const stillVisible = nativeCueElements().filter(
-      (el) => parseFloat(getComputedStyle(el).opacity || "1") > 0
-    );
-    if (stillVisible.length) {
-      console.warn(
-        DEBUG_PREFIX,
-        `hide rule injected, but ${stillVisible.length} native cue element(s) ` +
-          `are STILL VISIBLE — the raw source line will show through:`,
-        stillVisible.map((el) => ({
-          cls: el.className || el.tagName,
-          opacity: getComputedStyle(el).opacity,
-          inShadowRoot: el.getRootNode?.() !== document,
-        }))
-      );
-    }
+    // Use opacity so the native subtitle's background box disappears too
+    // (Disney+ renders an opaque black box behind its cues).
+    el.textContent = selectors
+      ? `${selectors} { opacity: 0 !important; }`
+      : "";
+    document.documentElement.appendChild(el);
   }
 
   // -------------- DOM helpers --------------
@@ -676,34 +493,17 @@
     return els;
   }
 
-  // Our own overlay must never be read back as a native cue. Loose platform
-  // selectors like [class*='subtitle'] (HBO Max, Apple TV+) match our
-  // llm-subtitle-* classes, and picking our own translation back up creates a
-  // feedback loop: the translated Chinese is detected as a skip-list language,
-  // renderOverlay stands down, and the untranslated native line flashes up.
-  function isOwnOverlay(el) {
-    if (!el) return false;
-    if (el.id === "llm-subtitle-overlay") return true;
-    return typeof el.closest === "function"
-      ? !!el.closest("#llm-subtitle-overlay")
-      : false;
-  }
-
   function collectNativeCueElements() {
     if (!platform.containerSelectors.length) return [];
     const joined = platform.containerSelectors.join(", ");
     const all = [];
     try {
-      document.querySelectorAll(joined).forEach((el) => {
-        if (!isOwnOverlay(el)) all.push(el);
-      });
+      document.querySelectorAll(joined).forEach((el) => all.push(el));
     } catch (_) {}
     for (const el of walkAllElements(document)) {
       if (el.shadowRoot) {
         try {
-          el.shadowRoot.querySelectorAll(joined).forEach((x) => {
-            if (!isOwnOverlay(x)) all.push(x);
-          });
+          el.shadowRoot.querySelectorAll(joined).forEach((x) => all.push(x));
         } catch (_) {}
       }
     }
@@ -914,22 +714,6 @@
     const promise = new Promise((resolve) => {
       const n = Math.max(0, settings?.contextLines ?? 0);
       const historySlice = n > 0 ? history.slice(-n) : [];
-      let settled = false;
-      const finish = (value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = setTimeout(() => {
-        console.error(
-          DEBUG_PREFIX,
-          `translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
-          JSON.stringify(text),
-          "— will retry when the line comes round again"
-        );
-        finish("");
-      }, TRANSLATE_TIMEOUT_MS);
       chrome.runtime.sendMessage(
         {
           type: "translate",
@@ -944,7 +728,7 @@
               `translation runtime error after ${dt}ms:`,
               chrome.runtime.lastError.message
             );
-            finish("");
+            resolve("");
             return;
           }
           if (!resp?.ok) {
@@ -953,7 +737,7 @@
               `translation failed after ${dt}ms:`,
               resp?.error
             );
-            finish("");
+            resolve("");
             return;
           }
           const joined = resp.translations.join("\n");
@@ -964,26 +748,6 @@
             "→",
             JSON.stringify(joined)
           );
-          if (
-            joined &&
-            translationLooksUntranslated(joined, settings?.targetLanguage)
-          ) {
-            console.warn(
-              DEBUG_PREFIX,
-              `model did NOT translate — the reply is still in the source ` +
-                `language, not ${settings?.targetLanguage}:`,
-              JSON.stringify(text),
-              "→",
-              JSON.stringify(joined)
-            );
-            lastUntranslated = { source: text, reply: joined, at: Date.now() };
-            droppedUntranslated++;
-            // Do not cache it: caching would make this line permanently
-            // untranslated. Returning empty lets it be retried instead of
-            // painting the source text as if it were a translation.
-            finish("");
-            return;
-          }
           cache.set(key, joined);
           if (cache.size > 500) {
             const firstKey = cache.keys().next().value;
@@ -996,7 +760,7 @@
               if (history.length > HISTORY_MAX) history.shift();
             }
           });
-          finish(joined);
+          resolve(joined);
         }
       );
     });
@@ -1050,19 +814,11 @@
     currentTranslated = "";
     renderOverlay();
 
-    // MIN_INTERVAL_MS paces calls to the translation API — so only pay it when
-    // a call is actually going to happen. A cache or in-flight hit needs no
-    // network at all, and in fast dialogue this delay alone can outlast the
-    // cue: the line ends before the translation lands, the strict-sync check
-    // below discards it, and that cue never shows a translation at all.
-    const key = normalize(text);
-    if (!cache.has(key) && !pending.has(key)) {
-      const now = Date.now();
-      if (now - lastTranslationAt < MIN_INTERVAL_MS) {
-        await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
-      }
-      lastTranslationAt = Date.now();
+    const now = Date.now();
+    if (now - lastTranslationAt < MIN_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
     }
+    lastTranslationAt = Date.now();
 
     const captured = text;
     const translation = await translateText(text);
@@ -1073,15 +829,6 @@
     if (captured === currentOriginal) {
       currentTranslated = translation;
       renderOverlay();
-    } else if (translation) {
-      // The line ended before its translation came back. Showing it now would
-      // paint the previous line's text over the current one, so it is dropped —
-      // the cache keeps it, but this cue displays nothing at all.
-      droppedLate++;
-      log(
-        `translation arrived too late, cue already gone (dropped ${droppedLate} so far):`,
-        JSON.stringify(captured)
-      );
     }
   }
 
@@ -1222,18 +969,7 @@
     return out;
   }
 
-  // `lang` is the language of the file these cues came from, when the file
-  // said so. A title can carry several subtitle tracks and the player may
-  // fetch more than the one the viewer picked, so cues have to stay
-  // attributable to their track instead of all landing in one anonymous pool.
-  // A cue belongs to the track being watched unless its file said otherwise.
-  // Cues with no known language are always allowed — we cannot rule them out.
-  function cueMatchesActiveTrack(c) {
-    if (!c.lang || !sessionLanguage) return true;
-    return c.lang === sessionLanguage;
-  }
-
-  function ingestParsedCues(cues, lang) {
+  function ingestParsedCues(cues) {
     if (!cues.length) return 0;
     let added = 0;
     for (const c of cues) {
@@ -1243,7 +979,6 @@
         start: c.start,
         end: c.end,
         text: c.text,
-        lang: lang || null,
         translation: null,
         translating: false,
       });
@@ -1269,19 +1004,13 @@
         // Mark them as "translated" with their source text so time-sync /
         // cache hits display them immediately.
         for (const c of cueList) {
-          if (!cueMatchesActiveTrack(c)) continue;
           if (c.translation === null && shouldSkipTranslation(c.text)) {
-            const k = normalize(c.text);
             c.translation = c.text;
-            cache.set(k, c.text);
-            skipMarkedKeys.add(k);
+            cache.set(normalize(c.text), c.text);
           }
         }
         const pool = cueList.filter(
-          (c) =>
-            c.translation === null &&
-            !c.translating &&
-            cueMatchesActiveTrack(c)
+          (c) => c.translation === null && !c.translating
         );
         if (!pool.length) break;
         const videos = getVideos();
@@ -1311,34 +1040,17 @@
                 const lines = batch.map((c) => c.text);
                 const t0 = Date.now();
                 const translations = await new Promise((resolve) => {
-                  let settled = false;
-                  const finish = (v) => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
-                    resolve(v);
-                  };
-                  // Same guarantee as translateText(): without it a dropped
-                  // callback leaves c.translating stuck and the cue never
-                  // returns to the pool.
-                  const timer = setTimeout(() => {
-                    console.error(
-                      DEBUG_PREFIX,
-                      `batch translation timed out after ${TRANSLATE_TIMEOUT_MS}ms`
-                    );
-                    finish(lines.map(() => ""));
-                  }, TRANSLATE_TIMEOUT_MS);
                   chrome.runtime.sendMessage(
                     { type: "translate", lines, history: [] },
                     (resp) => {
-                      if (resp?.ok) finish(resp.translations);
+                      if (resp?.ok) resolve(resp.translations);
                       else {
                         console.error(
                           DEBUG_PREFIX,
                           "batch translation failed:",
                           resp?.error
                         );
-                        finish(lines.map(() => ""));
+                        resolve(lines.map(() => ""));
                       }
                     }
                   );
@@ -1379,47 +1091,33 @@
     if (e.source !== window) return;
     if (e.origin && e.origin !== location.origin) return;
     const d = e.data;
-    if (d?.source === "__llm-subtitle-candidate") {
-      if (captureCandidates.length < 25) {
-        captureCandidates.push({
-          url: String(d.url || "").slice(0, 180),
-          contentType: String(d.contentType || ""),
-          passedUrlGate: !!d.narrowGate,
-          bodyLookedLikeSubtitle: d.sniffed,
-        });
-      }
-      return;
-    }
     if (!d || d.source !== "__llm-subtitle-capture") return;
     if (typeof d.text !== "string") return;
     const text = String(d.text || "");
     let cues = [];
-    let fileLang = null;
     if (text.startsWith("WEBVTT")) cues = parseWebVTT(text);
     else if (/<tt[\s>]/i.test(text)) {
       cues = parseTTML(text);
-      // TTML carries its language in xml:lang. This describes THIS FILE only —
-      // it must not be promoted to the session language, because the player
-      // also fetches tracks the viewer did not select, and letting a
-      // background prefetch redefine the session makes every later per-cue
-      // decision (skip list, kanji disambiguation) wrong.
+      // TTML carries the source language in xml:lang — use it as an
+      // authoritative hint so kanji-only Japanese lines aren't mis-classified
+      // as Chinese later on.
       const langMatch =
         text.match(/xml:lang="([^"]+)"/i) || text.match(/\slang="([^"]+)"/i);
-      fileLang = langMatch ? langCodeToDisplay(langMatch[1]) : null;
+      const display = langMatch ? langCodeToDisplay(langMatch[1]) : null;
+      if (display) setSessionLanguage(display);
     } else if (/^\s*\{\s*"(wireMagic|events)"/.test(text)) {
       cues = parseYouTubeJSON3(text);
     } else if (/<transcript/i.test(text.slice(0, 200))) {
       cues = parseYouTubeXML(text);
     }
-    // Subtitle URLs often name the track's language (`&lang=ja`, `.ja.vtt`).
-    if (!fileLang && d.url) {
-      const m =
-        d.url.match(/[?&]lang=([a-zA-Z-]+)/) ||
-        d.url.match(/[._-]([a-z]{2}(?:-[A-Za-z]{2,4})?)\.(?:vtt|ttml|dfxp|srt)/i);
-      fileLang = m ? langCodeToDisplay(m[1]) : null;
+    // YouTube embeds the source language in the timedtext URL (`&lang=ja` etc.)
+    if (!sessionLanguage && d.url) {
+      const m = d.url.match(/[?&]lang=([a-zA-Z-]+)/);
+      const display = m ? langCodeToDisplay(m[1]) : null;
+      if (display) setSessionLanguage(display);
     }
     if (cues.length) {
-      const added = ingestParsedCues(cues, fileLang);
+      const added = ingestParsedCues(cues);
       const sample = cues[0];
       console.log(
         DEBUG_PREFIX,
@@ -1445,9 +1143,7 @@
     let match = null;
     for (const c of cueList) {
       if (c.start <= t && t <= c.end) {
-        // With two tracks in the library, the same timestamp matches a cue in
-        // each. Only the watched track may be displayed.
-        if (cueMatchesActiveTrack(c)) match = c;
+        match = c;
       } else if (c.start > t) {
         break;
       }
@@ -1532,20 +1228,6 @@
       // extractSubtitle() just did and costs nothing extra.
       if (settings?.fontSizeSource === "platform") readNativeFont();
       handleCueChange(text);
-      // Re-assert the native-subtitle hide on every tick. renderOverlay() is
-      // the only other place that sets it, and it runs just on cue/settings
-      // changes — so anything that removes the style (a skip cue, an
-      // applySettings() pass while the URL is momentarily not recognised as a
-      // player page, the player rebuilding its subtitle DOM) leaves the raw
-      // source line on screen until the NEXT cue arrives. That is exactly the
-      // "one untranslated line, then back to normal" shape. Re-asserting here
-      // bounds the exposure to a single 200ms tick.
-      if (
-        settings?.enabled &&
-        !(currentOriginal && shouldSkipTranslation(currentOriginal))
-      ) {
-        hideNativeSubtitles(true);
-      }
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
       positionOverlayToVideo();
@@ -1614,67 +1296,6 @@
   // Content scripts run in every frame (all_frames), and Chrome keeps only
   // the first response. Frames with no player have nothing useful to say, so
   // they stay silent and let the frame that actually holds the video answer.
-  // Full state snapshot for the options page's diagnostics panel, so the
-  // common failure modes can be told apart without opening DevTools.
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type !== "getDiagnostics") return false;
-    const videos = getVideos();
-    if (!nativeCueElements().length && !videos.length) return false;
-    const cues = nativeCueElements().map((el) => {
-      const cs = getComputedStyle(el);
-      const root = el.getRootNode?.();
-      const inShadow = !!root && root !== document && !!root.host;
-      return {
-        cls: String(el.className || el.tagName).slice(0, 60),
-        text: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40),
-        opacity: cs.opacity,
-        inShadow,
-        hideRuleInRoot: !!findHideStyle(inShadow ? root : document, "llm-subtitle-hide-native"),
-      };
-    });
-    const ov = document.getElementById("llm-subtitle-overlay");
-    sendResponse({
-      host: location.hostname,
-      platform: platform.name,
-      playerPage: isPlayerPage(),
-      sessionLanguage,
-      trackHasKana: trackHasKana(),
-      skipLanguages: settings?.skipLanguages || [],
-      targetLanguage: settings?.targetLanguage || "",
-      showOriginal: !!settings?.showOriginal,
-      cueLibrarySize: cueLibrary.size,
-      droppedLate,
-      droppedUntranslated,
-      captureCandidates,
-      skipMarked: skipMarkedKeys.size,
-      nativeCues: cues,
-      overlay: ov
-        ? {
-            display: getComputedStyle(ov).display,
-            translated: (ov.querySelector(".llm-subtitle-translated")?.textContent || "").slice(0, 40),
-            original: (ov.querySelector(".llm-subtitle-original")?.textContent || "").slice(0, 40),
-          }
-        : null,
-      currentOriginal: (currentOriginal || "").slice(0, 40),
-      currentTranslated: (currentTranslated || "").slice(0, 40),
-      duplicated: !!currentTranslated && currentTranslated === currentOriginal,
-      provider: settings?.provider || "",
-      model: settings?.models?.[settings?.provider] || "(默认)",
-      translatedStillInSourceLanguage: translationLooksUntranslated(
-        currentTranslated,
-        settings?.targetLanguage
-      ),
-      lastUntranslatedReply: lastUntranslated
-        ? {
-            source: lastUntranslated.source.slice(0, 40),
-            reply: lastUntranslated.reply.slice(0, 40),
-            secondsAgo: Math.round((Date.now() - lastUntranslated.at) / 1000),
-          }
-        : null,
-    });
-    return false;
-  });
-
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type !== "getNativeFont") return false;
     const cueEls = nativeCueElements();
@@ -1692,42 +1313,10 @@
     return false;
   });
 
-  // Which VIDEO the URL refers to — deliberately not the whole href. Players
-  // rewrite their URL during playback (tracking refs, autoplay flags, resume
-  // positions); treating that as a new video wipes the pre-translated cue
-  // library, and the subtitle file is not fetched again because the player
-  // already has it. The library then stays empty for the rest of the episode
-  // and every line falls back to slow live translation.
-  const TITLE_ID_PARAMS = [
-    "v", // YouTube
-    "gti", // Prime Video
-    "asin",
-    "titleId",
-    "contentId",
-    "episodeId",
-  ];
-
-  function videoIdentity() {
-    let search = "";
-    try {
-      const params = new URLSearchParams(location.search);
-      search = TITLE_ID_PARAMS.map((k) => params.get(k))
-        .filter(Boolean)
-        .join(",");
-    } catch (_) {}
-    // Amazon appends tracking refs as a PATH segment (…/detail/B0ABC/ref=atv_dp),
-    // so query-param filtering alone is not enough.
-    const path = location.pathname
-      .replace(/\/ref=[^/]*/gi, "")
-      .replace(/\/+$/, "");
-    return `${path}${search ? `?${search}` : ""}`;
-  }
-
-  let lastVideoId = videoIdentity();
+  let lastHref = location.href;
   setInterval(() => {
-    const id = videoIdentity();
-    if (id !== lastVideoId) {
-      lastVideoId = id;
+    if (location.href !== lastHref) {
+      lastHref = location.href;
       currentOriginal = "";
       currentTranslated = "";
       lastLoggedText = null;
@@ -1735,12 +1324,9 @@
       cueList = [];
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
-      cjkAmbiguousSeen.clear();
-      skipMarkedKeys.clear();
-      kanaEvidence = { at: -1, value: false };
       console.log(
         DEBUG_PREFIX,
-        `new video detected (${id}); cue library cleared, re-evaluating`
+        `navigation detected (${location.pathname}); re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
       // and back should toggle the observer on/off accordingly.
