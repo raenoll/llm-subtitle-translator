@@ -58,7 +58,9 @@ const REQUEST_TIMEOUT_MS = 20000;
 
 async function fetchWithTimeout(url, options = {}) {
   try {
-    return await fetchWithTimeout(url, {
+    // NOTE: the global fetch, never this wrapper — see git history, a blanket
+    // rewrite of the call sites once turned this line into infinite recursion.
+    return await globalThis.fetch(url, {
       ...options,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
