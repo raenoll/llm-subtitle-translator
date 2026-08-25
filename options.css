@@ -286,7 +286,6 @@ button.ghost:hover { background: var(--bg); }
 /* A control that is unavailable because the other font mode owns it. */
 .row.is-disabled label,
 .row.is-disabled .hint { opacity: 0.45; }
-.switch input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
 input:disabled,
 select:disabled {
   opacity: 0.45;

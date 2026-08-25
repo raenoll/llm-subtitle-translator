@@ -191,25 +191,18 @@
 
       <section class="card">
         <h2>4. 译文样式</h2>
-        <div class="row" id="rowInherit">
+        <div class="row">
           <label>保留当前字体及字号</label>
           <label class="switch">
             <input id="fontInherit" type="checkbox" />
             <span class="slider"></span>
           </label>
           <small class="hint">
-            直接沿用当前流媒体网站正在渲染的字幕字体与字号，自动继承你在
-            Netflix / YouTube 等平台里设的字幕大小，并随播放器尺寸变化。
-            读不到时（平台字幕关闭、或字幕烧录在画面里）回退到下面的自定义设置。
+            <strong>开启</strong>：沿用当前流媒体网站正在渲染的字幕字体与字号，自动继承你在
+            Netflix / YouTube 等平台里设的字幕大小，并随播放器尺寸变化。读不到时
+            （平台字幕关闭、或字幕烧录在画面里）回退到下面的自定义设置。<br />
+            <strong>关闭</strong>：改用下面自定义的字体与字号。
           </small>
-        </div>
-        <div class="row">
-          <label>自定义字体及字号</label>
-          <label class="switch">
-            <input id="fontCustom" type="checkbox" />
-            <span class="slider"></span>
-          </label>
-          <small class="hint">开启后改用下面填写的字体与字号，上面的继承开关变灰不可用。</small>
         </div>
         <div class="row" id="rowFontFamily">
           <label>字体</label>

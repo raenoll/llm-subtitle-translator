@@ -60,36 +60,26 @@ async function load() {
 }
 
 // --- Font mode ------------------------------------------------------------
-// "保留当前字体及字号" and "自定义字体及字号" are two views of one stored
-// value, so they can never disagree or both end up off. Custom is the control;
-// the inherit switch mirrors it and greys out while custom owns the font.
+// One switch owns the whole choice: on = inherit the site's font, off = use
+// the custom fields below. A single control can't disagree with itself, so
+// there is no invalid state to guard against.
 
 function applyFontMode(mode) {
-  const custom = mode === "custom";
-  $("fontInherit").checked = !custom;
-  $("fontCustom").checked = custom;
-  // Requirement: with custom on, the inherit switch is greyed and unusable.
-  $("fontInherit").disabled = custom;
-  $("rowInherit").classList.toggle("is-disabled", custom);
-  // Symmetrically, the custom font fields are dead while inheriting.
-  $("fontFamily").disabled = !custom;
-  $("fontSize").disabled = !custom;
-  $("rowFontFamily").classList.toggle("is-disabled", !custom);
-  $("rowFontSize").classList.toggle("is-disabled", !custom);
+  const inheriting = mode === "platform";
+  $("fontInherit").checked = inheriting;
+  // The custom fields are dead while inheriting.
+  $("fontFamily").disabled = inheriting;
+  $("fontSize").disabled = inheriting;
+  $("rowFontFamily").classList.toggle("is-disabled", inheriting);
+  $("rowFontSize").classList.toggle("is-disabled", inheriting);
   updateStylePreview();
 }
 
-function setFontMode(mode) {
+$("fontInherit").addEventListener("change", (e) => {
+  const mode = e.target.checked ? "platform" : "custom";
   applyFontMode(mode);
   saveField("fontSource", mode);
-}
-
-$("fontCustom").addEventListener("change", (e) =>
-  setFontMode(e.target.checked ? "custom" : "platform")
-);
-$("fontInherit").addEventListener("change", (e) =>
-  setFontMode(e.target.checked ? "platform" : "custom")
-);
+});
 
 // --- Live font readout from the open streaming tab ------------------------
 // Kept up to date in both modes, so the current site's font is always visible.
