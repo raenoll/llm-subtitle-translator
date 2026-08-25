@@ -33,10 +33,11 @@ const DEFAULT_SETTINGS = {
   batchSize: 3,
   contextLines: 0,
   debug: false,
-  // "custom" = use fontFamily/fontSize below; "platform" = read the font off
-  // the streaming player's own cues and fall back to these when unreadable.
-  fontSource: "custom",
   fontFamily: "",
+  // Only the size can follow the player: "platform" reads the size off the
+  // site's own cues, "custom" uses fontSize below. The family is never
+  // inherited — a Western caption font has no CJK glyphs to lend.
+  fontSizeSource: "custom",
   fontSize: 32,
   // Semi-transparent backdrop behind the subtitle text. The outline alone is
   // hard to read over bright scenes, so a faint black box is on by default.
@@ -565,5 +566,11 @@ chrome.runtime.onInstalled.addListener(async () => {
   const p = merged.provider;
   if (p && merged.apiKey && !merged.apiKeys[p]) merged.apiKeys[p] = merged.apiKey;
   if (p && merged.model && !merged.models[p]) merged.models[p] = merged.model;
+  // Migration: `fontSource` used to control family+size together; it now
+  // applies to the size alone under a clearer name.
+  if (current.fontSource && !current.fontSizeSource) {
+    merged.fontSizeSource = current.fontSource;
+  }
+  delete merged.fontSource;
   await chrome.storage.sync.set(merged);
 });

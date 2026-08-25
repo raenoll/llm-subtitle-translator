@@ -48,7 +48,7 @@ async function load() {
   $("showOriginal").checked = !!s.showOriginal;
   $("enabled").checked = !!s.enabled;
   $("debug").checked = !!s.debug;
-  applyFontMode(s.fontSource || "custom");
+  applyFontSizeMode(s.fontSizeSource || "custom");
   $("fontFamily").value = s.fontFamily || "";
   $("fontSize").value = s.fontSize ?? 32;
   $("googleProjectId").value = s.googleProjectId || "";
@@ -59,32 +59,23 @@ async function load() {
   updateStylePreview();
 }
 
-// --- Font mode ------------------------------------------------------------
-// One switch owns the whole choice: on = inherit the site's font, off = use
-// the custom fields below. A single control can't disagree with itself, so
-// there is no invalid state to guard against.
+// --- Font size mode -------------------------------------------------------
+// The switch governs the size only: on = follow the site's caption size,
+// off = use the px field below. The family is always the user's own, so it
+// is never disabled.
 
-function applyFontMode(mode) {
+function applyFontSizeMode(mode) {
   const inheriting = mode === "platform";
-  $("fontInherit").checked = inheriting;
-  // Size is fully inherited, so that field goes dead. The font field stays
-  // live either way: while inheriting it supplies the glyphs the site's own
-  // caption font lacks (Chinese text on a Latin-only Western font), appended
-  // after the site's stack rather than replacing it.
+  $("fontSizeInherit").checked = inheriting;
   $("fontSize").disabled = inheriting;
   $("rowFontSize").classList.toggle("is-disabled", inheriting);
-  $("fontFamily").disabled = false;
-  $("rowFontFamily").classList.remove("is-disabled");
-  $("fontFamilyHint").textContent = inheriting
-    ? "网站字体缺少的字形用它补上——西方网站的字幕字体没有中文，译文会用这里填的字体。留空则用系统默认中文字体。"
-    : "填任意 CSS font-family 值。留空则使用系统默认。";
   updateStylePreview();
 }
 
-$("fontInherit").addEventListener("change", (e) => {
+$("fontSizeInherit").addEventListener("change", (e) => {
   const mode = e.target.checked ? "platform" : "custom";
-  applyFontMode(mode);
-  saveField("fontSource", mode);
+  applyFontSizeMode(mode);
+  saveField("fontSizeSource", mode);
 });
 
 // --- Live font readout from the open streaming tab ------------------------
@@ -105,40 +96,6 @@ const STREAMING_MATCHES = [
 ];
 
 let nativeFontReading = null; // last successful read, for the preview
-
-// Mirrors withFallbackFont() in content.js. A CSS generic family matches every
-// character, so a font listed after one never gets used — the extra font must
-// be spliced in ahead of the generic.
-const GENERIC_FAMILIES = new Set([
-  "serif",
-  "sans-serif",
-  "monospace",
-  "cursive",
-  "fantasy",
-  "system-ui",
-  "ui-serif",
-  "ui-sans-serif",
-  "ui-monospace",
-  "ui-rounded",
-  "math",
-  "emoji",
-  "fangsong",
-]);
-
-function withFallbackFont(stack, extra) {
-  if (!extra) return stack;
-  if (!stack) return extra;
-  const parts = stack
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-  const at = parts.findIndex((x) =>
-    GENERIC_FAMILIES.has(x.toLowerCase().replace(/^["']|["']$/g, ""))
-  );
-  if (at === -1) parts.push(extra);
-  else parts.splice(at, 0, extra);
-  return parts.join(", ");
-}
 
 function showNativeFont(text, ok = false) {
   const el = $("nativeFontInfo");
@@ -210,16 +167,10 @@ document.addEventListener("visibilitychange", () => {
 // Mirrors the overlay styling in content.css / renderOverlay() so the font
 // and backdrop settings can be judged without switching to a real player.
 function updateStylePreview() {
-  const inheriting = $("fontInherit").checked;
-  // While inheriting, preview what the open player actually reported.
+  const inheriting = $("fontSizeInherit").checked;
+  // Only the size can come from the player; the family is always the user's.
   const useNative = inheriting && nativeFontReading;
-  const custom = $("fontFamily").value.trim();
-  // Same stack the overlay builds — see withFallbackFont() in content.js: the
-  // configured font goes *before* the site stack's generic family, since a
-  // generic matches every character and would swallow the fallback.
-  const fam = useNative
-    ? withFallbackFont(nativeFontReading.fontFamily, custom)
-    : custom;
+  const fam = $("fontFamily").value.trim();
   const on = $("textBgEnabled").checked;
   const pct = on ? Math.max(0, Math.min(90, Number($("textBgOpacity").value) || 0)) : 0;
   const bg = `rgba(0, 0, 0, ${pct / 100})`;
@@ -242,8 +193,8 @@ function updateStylePreview() {
   $("previewHint").textContent = !inheriting
     ? "背景为模拟的亮画面，实际字号会按视频分辨率缩放。"
     : useNative
-      ? `按上面读到的网站字体预览（${Math.round(nativeFontReading.fontSize)}px 已缩放以适应预览框）。`
-      : "跟随网站字体，但当前读不到；播放时将回退到下面的自定义设置。";
+      ? `字号按上面读到的网站字号 ${Math.round(nativeFontReading.fontSize)}px 预览（已缩放以适应预览框）。`
+      : "跟随网站字号，但当前读不到；播放时将回退到下面的自定义字号。";
 }
 
 function applyProviderSwap() {

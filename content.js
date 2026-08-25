@@ -361,28 +361,23 @@
         ? 0
         : Math.max(0, Math.min(100, Number(settings.textBgOpacity ?? 35))) / 100;
     ov.style.setProperty("--llm-sub-bg", `rgba(0, 0, 0, ${bgAlpha})`);
-    // Either the user's own font (scaled to the video height, above) or
-    // whatever the platform is currently rendering its cues at. The platform
-    // value is already in rendered px, so it takes no further scaling.
-    let famOut = fam || "";
+    // The font family is always the user's own. Inheriting the site's family
+    // is pointless for CJK output: a Western caption font carries no CJK
+    // glyphs, so translated text falls through it to a default face anyway.
+    // Only the size is worth inheriting — it already reflects the viewer's
+    // caption-size preference and the player's own scaling.
+    const famOut = fam || "";
     let sizeOut = sz;
-    if (settings.fontSource === "platform") {
+    if (settings.fontSizeSource === "platform") {
       const nat = readNativeFont();
       if (nat) {
-        // Append the configured font *after* the site's stack rather than
-        // replacing it. CSS font fallback is per-glyph, and a Western site's
-        // caption font ("Netflix Sans", Roboto, …) carries no CJK glyphs — so
-        // translated Chinese text skips the whole inherited stack and lands on
-        // the browser's generic default. Appending puts the user's font in
-        // that slot, while Latin text (the original-text row) still renders in
-        // the site's own face. One stack does the right thing for both rows.
-        famOut = withFallbackFont(nat.fontFamily, fam);
+        // Already in rendered px, so it takes no further scaling.
         sizeOut = nat.fontSize;
       } else if (!missingNativeFontLogged) {
         missingNativeFontLogged = true;
         log(
-          "fontSource=platform, but no native cue font could be measured yet — " +
-            "falling back to the custom font. Is the platform's own subtitle " +
+          "fontSizeSource=platform, but no native cue could be measured yet — " +
+            "falling back to the custom size. Is the platform's own subtitle " +
             "track switched on?"
         );
       }
@@ -568,41 +563,6 @@
       for (const child of node.children || []) stack.push([child, depth + 1]);
     }
     return best;
-  }
-
-  // CSS generic families (sans-serif, serif, …) match *every* character, so a
-  // font listed after one is unreachable. Site caption stacks almost always
-  // end in a generic, which means appending at the end silently does nothing —
-  // the extra font has to be spliced in ahead of the generic.
-  const GENERIC_FAMILIES = new Set([
-    "serif",
-    "sans-serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "math",
-    "emoji",
-    "fangsong",
-  ]);
-
-  function withFallbackFont(stack, extra) {
-    if (!extra) return stack;
-    if (!stack) return extra;
-    const parts = stack
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    const at = parts.findIndex((x) =>
-      GENERIC_FAMILIES.has(x.toLowerCase().replace(/^["']|["']$/g, ""))
-    );
-    if (at === -1) parts.push(extra);
-    else parts.splice(at, 0, extra);
-    return parts.join(", ");
   }
 
   function readNativeFont() {
@@ -1261,7 +1221,7 @@
       // leaves us silently on the fallback font until the next cue change.
       // nativeCueElements() is memoized, so this shares the DOM walk that
       // extractSubtitle() just did and costs nothing extra.
-      if (settings?.fontSource === "platform") readNativeFont();
+      if (settings?.fontSizeSource === "platform") readNativeFont();
       handleCueChange(text);
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
