@@ -166,6 +166,14 @@
   // captured subtitle file), and fall back to it for ambiguous lines.
   const TRADITIONAL_MARKERS = /[繁體國學愛們會個時這萬對發頭來說麼這個話請過點時當開關長無師寫聽車馬龍樓嗎見讀書現實內對應動進經濟經過機構參與飛錢麵]/;
   let sessionLanguage = null; // reset on navigation
+  // Kanji-only lines ("大丈夫", "準備完了") are genuinely ambiguous between
+  // Chinese and Japanese. Distinct such lines seen so far this session; once
+  // enough have gone by with no kana anywhere, the track really is Chinese.
+  const cjkAmbiguousSeen = new Set();
+  const CJK_SETTLE_LINES = 3;
+  // Deliberately not a plausible skip-list entry: an unsettled CJK line must
+  // never match the skip list.
+  const CJK_UNDECIDED = "CJK（待定）";
 
   function setSessionLanguage(lang) {
     if (lang && sessionLanguage !== lang) {
@@ -208,12 +216,27 @@
     }
     // CJK-dominant — ambiguous between Chinese and Japanese.
     if (cjk > 0 && cjk >= latinWeight) {
-      // If the session has already been firmly identified as Japanese /
-      // Korean (via an earlier line or the subtitle file's xml:lang), trust
-      // that over a naive Chinese classification.
+      // If the session has already been firmly identified (via an earlier
+      // line's kana / hangul, or the subtitle file's xml:lang), trust that
+      // over a naive per-line classification.
       if (sessionLanguage === "日本語") return "日本語";
       if (sessionLanguage === "한국어") return "한국어";
-      return TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
+      const zh = TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
+      if (sessionLanguage === "简体中文" || sessionLanguage === "繁體中文") {
+        return zh;
+      }
+      // Nothing has settled the track's language yet. Guessing "Chinese" here
+      // is the expensive mistake: Chinese is in the default skip list, so the
+      // cue takes the stand-down path and the raw untranslated source line is
+      // shown. Guessing the other way costs one redundant API call. So stay
+      // undecided — and therefore translate — until several distinct
+      // kanji-only lines have gone by without a single kana appearing.
+      cjkAmbiguousSeen.add(normalize(text));
+      if (cjkAmbiguousSeen.size >= CJK_SETTLE_LINES) {
+        setSessionLanguage(zh);
+        return zh;
+      }
+      return CJK_UNDECIDED;
     }
     if (latin > 0) {
       // Latin is ambiguous between English / Spanish / French / German etc.;
@@ -1354,6 +1377,7 @@
       cueList = [];
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
+      cjkAmbiguousSeen.clear();
       console.log(
         DEBUG_PREFIX,
         `navigation detected (${location.pathname}); re-evaluating`
