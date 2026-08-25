@@ -144,6 +144,11 @@
   const pending = new Map();
   let lastTranslationAt = 0;
   const MIN_INTERVAL_MS = 150;
+  // Safety net for the message round trip. The service worker bounds its own
+  // network calls, but if it is torn down mid-flight the callback can simply
+  // never fire. An unsettled promise never runs its .finally(), so the pending
+  // entry for that cue would wedge and the line would stay silent forever.
+  const TRANSLATE_TIMEOUT_MS = 25000;
   let lastLoggedText = null;
   let cueSetAt = 0;
   const STALE_CUE_MS = 10000; // force-clear if the same cue persists this long
@@ -775,6 +780,22 @@
     const promise = new Promise((resolve) => {
       const n = Math.max(0, settings?.contextLines ?? 0);
       const historySlice = n > 0 ? history.slice(-n) : [];
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        console.error(
+          DEBUG_PREFIX,
+          `translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
+          JSON.stringify(text),
+          "— will retry when the line comes round again"
+        );
+        finish("");
+      }, TRANSLATE_TIMEOUT_MS);
       chrome.runtime.sendMessage(
         {
           type: "translate",
@@ -789,7 +810,7 @@
               `translation runtime error after ${dt}ms:`,
               chrome.runtime.lastError.message
             );
-            resolve("");
+            finish("");
             return;
           }
           if (!resp?.ok) {
@@ -798,7 +819,7 @@
               `translation failed after ${dt}ms:`,
               resp?.error
             );
-            resolve("");
+            finish("");
             return;
           }
           const joined = resp.translations.join("\n");
@@ -821,7 +842,7 @@
               if (history.length > HISTORY_MAX) history.shift();
             }
           });
-          resolve(joined);
+          finish(joined);
         }
       );
     });
@@ -1125,17 +1146,34 @@
                 const lines = batch.map((c) => c.text);
                 const t0 = Date.now();
                 const translations = await new Promise((resolve) => {
+                  let settled = false;
+                  const finish = (v) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    resolve(v);
+                  };
+                  // Same guarantee as translateText(): without it a dropped
+                  // callback leaves c.translating stuck and the cue never
+                  // returns to the pool.
+                  const timer = setTimeout(() => {
+                    console.error(
+                      DEBUG_PREFIX,
+                      `batch translation timed out after ${TRANSLATE_TIMEOUT_MS}ms`
+                    );
+                    finish(lines.map(() => ""));
+                  }, TRANSLATE_TIMEOUT_MS);
                   chrome.runtime.sendMessage(
                     { type: "translate", lines, history: [] },
                     (resp) => {
-                      if (resp?.ok) resolve(resp.translations);
+                      if (resp?.ok) finish(resp.translations);
                       else {
                         console.error(
                           DEBUG_PREFIX,
                           "batch translation failed:",
                           resp?.error
                         );
-                        resolve(lines.map(() => ""));
+                        finish(lines.map(() => ""));
                       }
                     }
                   );
