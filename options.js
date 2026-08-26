@@ -25,6 +25,10 @@ const MODEL_PRESETS = {
   anthropic: ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5"],
   custom: [],
 };
+// Fallback model per backend, sent by the service worker so this page never
+// keeps a second copy that could drift.
+let defaultModels = {};
+
 // Sentinel for the last entry. Cannot collide with a real model name.
 const MODEL_CUSTOM = "__custom__";
 
@@ -54,6 +58,7 @@ async function load() {
   Object.assign(apiKeys, s.apiKeys || {});
   for (const k of Object.keys(models)) delete models[k];
   Object.assign(models, s.models || {});
+  defaultModels = s.defaultModels || {};
   skipLanguages.length = 0;
   skipLanguages.push(...(s.skipLanguages || []));
   renderSkipChips();
@@ -383,9 +388,17 @@ function renderModelPresets(provider, stored) {
     o.textContent = label;
     sel.appendChild(o);
   };
-  // Empty stays a real choice: it means "let the backend pick", which is what
-  // existing installs have stored. Dropping it would silently switch model.
-  add("", "使用后端默认");
+  // Empty stays a real choice — it is what existing installs have stored, and
+  // dropping it would silently switch their model. Name the model it actually
+  // resolves to: "default" on its own tells the user nothing, and for Gemini it
+  // is an older model than any of the presets.
+  const fallback = defaultModels[provider];
+  add(
+    "",
+    fallback
+      ? `默认（${fallback}）`
+      : "默认（未指定 · 需自行填写模型名）"
+  );
   for (const m of presets) add(m, m);
   add(MODEL_CUSTOM, "自定义…");
 

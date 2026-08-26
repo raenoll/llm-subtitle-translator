@@ -568,7 +568,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
   if (msg?.type === "getSettings") {
-    getSettings().then((s) => sendResponse(s));
+    // Ship the fallback table along with the settings so the options page can
+    // name the concrete model instead of saying a vague "default" — and so it
+    // never has to keep its own copy that could drift from this one.
+    getSettings().then((s) =>
+      sendResponse({ ...s, defaultModels: { ...PROVIDER_DEFAULT_MODEL } })
+    );
     return true;
   }
   if (msg?.type === "setSettings") {
