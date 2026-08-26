@@ -388,24 +388,18 @@ function renderModelPresets(provider, stored) {
     o.textContent = label;
     sel.appendChild(o);
   };
-  // Empty stays a real choice — it is what existing installs have stored, and
-  // dropping it would silently switch their model. Name the model it actually
-  // resolves to: "default" on its own tells the user nothing, and for Gemini it
-  // is an older model than any of the presets.
-  const fallback = defaultModels[provider];
-  add(
-    "",
-    fallback
-      ? `默认（${fallback}）`
-      : "默认（未指定 · 需自行填写模型名）"
-  );
   for (const m of presets) add(m, m);
   add(MODEL_CUSTOM, "自定义…");
 
-  const isPreset = presets.includes(stored);
-  const useCustom = !!stored && !isPreset;
-  sel.value = useCustom ? MODEL_CUSTOM : stored || "";
-  $("rowModelCustom").hidden = !useCustom;
+  // There is no "use the default" entry: the model is always an explicit
+  // choice. A blank stored value (what older installs have) still resolves
+  // through PROVIDER_DEFAULT_MODEL in the service worker, so show whichever
+  // preset that is — the dropdown then matches what actually gets sent.
+  const effective = stored || defaultModels[provider] || presets[0] || "";
+  const isPreset = presets.includes(effective);
+  const useCustom = !!effective && !isPreset;
+  sel.value = useCustom ? MODEL_CUSTOM : isPreset ? effective : MODEL_CUSTOM;
+  $("rowModelCustom").hidden = !(useCustom || !isPreset);
 }
 
 $("modelPreset").addEventListener("change", (e) => {
