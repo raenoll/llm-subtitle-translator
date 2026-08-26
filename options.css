@@ -24,6 +24,11 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute has to beat the layout rules below: .row sets
+   display:grid, which otherwise wins over the UA stylesheet's display:none and
+   leaves "hidden" rows on screen. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   padding: 0;

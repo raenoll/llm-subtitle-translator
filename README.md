@@ -32,7 +32,7 @@
 | `content.css` | 翻译覆盖层样式（大字 + 黑描边 + 半透明黑底，兼容全屏） |
 | `inject.js` | 注入页面 MAIN world，拦截字幕文件请求以支持提前翻译 |
 | `popup.html/js/css` | 点图标后的快速开关面板 |
-| `options.html/js/css` | 完整设置页（API key / 模型 / 上下文 / 语言 / 译文样式 / 运行日志） |
+| `options.html/js/css` | 完整设置页（API key / 模型选择 / 上下文 / 语言 / 译文样式 / 运行日志） |
 | `icons/` | 16 / 48 / 128 px 占位图标 |
 
 ## 支持的平台

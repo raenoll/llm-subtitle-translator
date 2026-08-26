@@ -40,8 +40,13 @@
           </div>
           <div class="row">
             <label>模型</label>
-            <input id="model" type="text" placeholder="留空则使用默认模型" />
+            <select id="modelPreset"></select>
             <small id="modelHint" class="hint"></small>
+          </div>
+          <div class="row" id="rowModelCustom" hidden>
+            <label>自定义模型</label>
+            <input id="model" type="text" placeholder="填写模型名称，如 gemini-3.6-pro" />
+            <small class="hint">上方选择「自定义」后，这里填写的名称会原样发给后端。</small>
           </div>
           <div class="row" id="customRow" hidden>
             <label>自定义 Endpoint</label>

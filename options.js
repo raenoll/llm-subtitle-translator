@@ -1,15 +1,32 @@
 const $ = (id) => document.getElementById(id);
 
 const MODEL_HINTS = {
-  gemini: "默认: gemini-2.5-flash；也可填 gemini-2.5-pro 等。",
-  openai: "默认: gpt-4o-mini；也可填 gpt-4.1-mini / gpt-4.1 等。",
-  anthropic: "默认: claude-haiku-4-5-20251001；也可填其他 Claude 型号。",
+  gemini: "从上面的列表里选，或选「自定义」填写任意模型名。留空则使用后端默认。",
+  openai: "从上面的列表里选，或选「自定义」填写任意模型名。留空则使用后端默认。",
+  anthropic: "从上面的列表里选，或选「自定义」填写任意模型名。留空则使用后端默认。",
   "google-translate":
     "Google Translate v2 无需模型设置，此项可留空。Cloud Translation API v2，需要在 Google Cloud Console 开启 API 并创建 API Key。",
   "google-translate-v3":
     "默认 general/translation-llm（Gemini 驱动，质量最好）；填 general/nmt 则用传统 NMT。也可填完整资源路径 projects/PROJECT/locations/LOC/models/general/translation-llm 或自训 AutoML 模型。",
-  custom: "填写你的目标模型名。Endpoint 必须是 OpenAI chat/completions 兼容。",
+  custom: "选「自定义」填写你的目标模型名。Endpoint 必须是 OpenAI chat/completions 兼容。",
 };
+
+// Preset model names offered per backend. The stored value stays a plain
+// string, so anything not in this list simply shows up as 自定义 — the presets
+// are a convenience, never a restriction.
+const MODEL_PRESETS = {
+  gemini: [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+  ],
+  openai: ["gpt-4o-mini"],
+  anthropic: ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5"],
+  custom: [],
+};
+// Sentinel for the last entry. Cannot collide with a real model name.
+const MODEL_CUSTOM = "__custom__";
 
 // Local cache of the per-provider maps so that editing the API key or model
 // for the currently-selected provider writes back to the correct slot, and
@@ -350,10 +367,46 @@ function applyProviderSwap() {
   // Populate each block's fields from its own slot in the per-provider maps.
   $("apiKey").value = isLLM ? apiKeys[p] || "" : "";
   $("model").value = isLLM ? models[p] || "" : "";
+  if (isLLM) renderModelPresets(p, models[p] || "");
   $("apiKeyV2").value = apiKeys["google-translate"] || "";
   $("saJson").value = apiKeys["google-translate-v3"] || "";
   $("modelV3").value = models["google-translate-v3"] || "";
 }
+
+function renderModelPresets(provider, stored) {
+  const sel = $("modelPreset");
+  const presets = MODEL_PRESETS[provider] || [];
+  sel.innerHTML = "";
+  const add = (value, label) => {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = label;
+    sel.appendChild(o);
+  };
+  // Empty stays a real choice: it means "let the backend pick", which is what
+  // existing installs have stored. Dropping it would silently switch model.
+  add("", "使用后端默认");
+  for (const m of presets) add(m, m);
+  add(MODEL_CUSTOM, "自定义…");
+
+  const isPreset = presets.includes(stored);
+  const useCustom = !!stored && !isPreset;
+  sel.value = useCustom ? MODEL_CUSTOM : stored || "";
+  $("rowModelCustom").hidden = !useCustom;
+}
+
+$("modelPreset").addEventListener("change", (e) => {
+  const provider = $("provider").value;
+  const custom = e.target.value === MODEL_CUSTOM;
+  $("rowModelCustom").hidden = !custom;
+  if (custom) {
+    $("model").focus();
+    return; // keep whatever is already typed; the input owns the value
+  }
+  models[provider] = e.target.value;
+  $("model").value = e.target.value;
+  saveField("models", { ...models });
+});
 
 async function saveField(key, value) {
   await chrome.runtime.sendMessage({
@@ -416,6 +469,13 @@ function bindLLMField(id, mapRef, mapName) {
 }
 bindLLMField("apiKey", apiKeys, "apiKeys");
 bindLLMField("model", models, "models");
+// While 自定义 is selected the text input owns the value; keep the dropdown
+// on 自定义 rather than letting it snap to a preset the user just typed out.
+$("model").addEventListener("input", () => {
+  if ($("modelPreset").value !== MODEL_CUSTOM) {
+    $("modelPreset").value = MODEL_CUSTOM;
+  }
+});
 
 // Fixed-slot fields — each writes to a specific provider's slot regardless
 // of which provider is currently active.
