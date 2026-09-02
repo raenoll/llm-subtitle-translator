@@ -76,7 +76,7 @@ const PROVIDER_DEFAULT_MODEL = {
   // Keep this equal to the first preset offered in the options page: with the
   // "use the default" entry gone, a blank stored value must resolve to the
   // model the dropdown is showing.
-  gemini: "gemini-3.6-flash",
+  gemini: "gemini-3.8-flash",
   openai: "gpt-4o-mini",
   anthropic: "claude-haiku-4-5-20251001",
   custom: "",

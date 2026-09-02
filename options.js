@@ -16,7 +16,7 @@ const MODEL_HINTS = {
 // are a convenience, never a restriction.
 const MODEL_PRESETS = {
   gemini: [
-    "gemini-3.6-flash",
+    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
