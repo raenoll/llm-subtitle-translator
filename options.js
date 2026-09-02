@@ -501,7 +501,11 @@ bindFixedSlot("apiKeyV2", apiKeys, "apiKeys", "google-translate");
 bindFixedSlot("saJson", apiKeys, "apiKeys", "google-translate-v3");
 bindFixedSlot("modelV3", models, "models", "google-translate-v3");
 bindText("customEndpoint", "customEndpoint");
-bindText("temperature", "temperature", (v) => Number(v));
+// An emptied field means "back to the default", not 0 — otherwise clearing it
+// would silently pin temperature to 0.
+bindText("temperature", "temperature", (v) =>
+  v.trim() === "" ? 0.2 : Number(v)
+);
 bindText("targetLanguage", "targetLanguage");
 bindText("contextLines", "contextLines", (v) => Number(v));
 bindCheckbox("showOriginal", "showOriginal");

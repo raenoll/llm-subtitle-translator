@@ -522,7 +522,17 @@ async function translate({ lines, history }) {
     model,
     system,
     user,
-    temperature: Number(settings.temperature) || 0.2,
+    // NOT `Number(x) || 0.2`: zero is falsy, so that silently rewrote an
+    // explicit 0 — the most deterministic setting, and a sensible one for
+    // subtitles — into 0.2. Only a genuinely unusable value falls back.
+    temperature: (() => {
+      const raw = settings.temperature;
+      // Number("") and Number(null) are both 0, which would turn "not set"
+      // into the most deterministic setting rather than the default.
+      if (raw === "" || raw === null || raw === undefined) return 0.2;
+      const t = Number(raw);
+      return Number.isFinite(t) ? Math.min(2, Math.max(0, t)) : 0.2;
+    })(),
   };
 
   let output;
