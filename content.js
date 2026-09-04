@@ -188,6 +188,15 @@
   let lastLoggedText = null;
   let cueSetAt = 0;
   const STALE_CUE_MS = 10000; // force-clear if the same cue persists this long
+  // How long the last rendered line stays up after its cue ends. Subtitle
+  // files leave small gaps between consecutive lines, and the DOM poll only
+  // samples every 200ms, so hiding the instant a cue ends makes the overlay
+  // blink at every boundary — with a backdrop box behind it, that reads as
+  // harsh flicker. The native renderer just swaps its text and looks
+  // continuous; holding briefly reproduces that. Long enough to bridge a gap
+  // plus one poll tick, short enough that a real pause still clears promptly.
+  const CUE_HOLD_MS = 400;
+  let hideTimer = null;
 
   // --- Pre-translation library (populated by inject.js via postMessage) ---
   // cueLibrary: unique key ("start|end|text") -> { start, end, text, translation, translating }
@@ -357,9 +366,17 @@
     );
   }
 
+  function hideOverlayNow(ov, tEl, oEl) {
+    clearTimeout(hideTimer);
+    hideTimer = null;
+    if (ov) ov.style.display = "none";
+    if (tEl) tEl.textContent = "";
+    if (oEl) oEl.textContent = "";
+  }
+
   function renderOverlay() {
     if (!settings?.enabled) {
-      if (overlay) overlay.style.display = "none";
+      hideOverlayNow(overlay);
       hideNativeSubtitles(false);
       return;
     }
@@ -370,7 +387,7 @@
     const isSkipping =
       currentOriginal && shouldSkipTranslation(currentOriginal);
     if (isSkipping) {
-      if (overlay) overlay.style.display = "none";
+      hideOverlayNow(overlay);
       hideNativeSubtitles(false);
       return;
     }
@@ -378,7 +395,28 @@
     const tEl = ov.querySelector(".llm-subtitle-translated");
     const oEl = ov.querySelector(".llm-subtitle-original");
     const hasText = currentOriginal || currentTranslated;
-    ov.style.display = hasText ? "flex" : "none";
+    if (!hasText) {
+      // Hold the last frame instead of blanking immediately — see CUE_HOLD_MS.
+      // Everything below would clear the rows, so return before it runs and
+      // leave what is on screen exactly as it is.
+      if (ov.style.display !== "none" && !hideTimer) {
+        hideTimer = setTimeout(() => {
+          hideTimer = null;
+          // Only if nothing arrived while we waited.
+          if (!currentOriginal && !currentTranslated) {
+            hideOverlayNow(ov, tEl, oEl);
+          }
+        }, CUE_HOLD_MS);
+      }
+      hideNativeSubtitles(true);
+      positionOverlayToVideo();
+      return;
+    }
+    // A new line arrived: cancel the pending hide so the box never blinks
+    // between two consecutive cues, it just swaps its text.
+    clearTimeout(hideTimer);
+    hideTimer = null;
+    ov.style.display = "flex";
     tEl.textContent = currentTranslated || "";
     oEl.textContent = settings.showOriginal ? currentOriginal || "" : "";
     // Apply user-configurable font to the translated row. The original row
