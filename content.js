@@ -366,6 +366,62 @@
     );
   }
 
+  // --- Translation line reflow ---------------------------------------------
+  // The subtitle file splits a cue across lines to fit the SOURCE language's
+  // width (parseTTML turns <br/> into "\n"), and the model mirrors that split.
+  // A translation rarely breaks well in the same places, so join the lines
+  // into one run that simply wraps at the overlay's max-width — keeping a
+  // break only where it carries meaning:
+  //   · after a sentence end (。！？ / .!?), optionally followed by a closer
+  //   · at a dash — a line opening with one (dialogue) or ending with one
+  //     (continuation, e.g. "……也在预算之内——")
+  //   · before a speaker label such as （杉山） / (Sugiyama) / 【杉山】
+  // A lone "." counts, but not the last dot of "..." — an ellipsis trails off
+  // mid-thought, and treating it as a sentence end would keep a break there.
+  const REFLOW_SENTENCE_END = /(?:[。！？!?]|(?<!\.)\.)[」』）)"'”’]*$/;
+  const REFLOW_DASH_START = /^[-－—―–‐]/;
+  const REFLOW_DASH_END = /(?:—|―|–|－|--)$/;
+  const REFLOW_SPEAKER_START = /^[（(［\[【][^）)\]］】\n]{1,20}[）)\]］】]/;
+  // Joining across a CJK (or full-width) boundary needs no space; Latin does.
+  const REFLOW_CJK = /[\u3000-\u303F\u3040-\u30FF\u3400-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
+
+  function breakCarriesMeaning(prev, cur) {
+    return (
+      REFLOW_SENTENCE_END.test(prev) ||
+      REFLOW_DASH_END.test(prev) ||
+      REFLOW_DASH_START.test(cur) ||
+      REFLOW_SPEAKER_START.test(cur)
+    );
+  }
+
+  function reflowTranslation(text, source) {
+    if (!text || !text.includes("\n")) return text || "";
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 2) return lines.join("");
+    // Models sometimes drop the leading "-" or speaker label. When the source
+    // has the same number of lines, its structure can vouch for the break too.
+    const src = (source || "").split("\n").map((l) => l.trim()).filter(Boolean);
+    const aligned = src.length === lines.length;
+    let out = lines[0];
+    for (let i = 1; i < lines.length; i++) {
+      const prev = lines[i - 1];
+      const cur = lines[i];
+      if (
+        breakCarriesMeaning(prev, cur) ||
+        (aligned && breakCarriesMeaning(src[i - 1], src[i]) &&
+          // …but a source sentence end alone is not a reason: that's exactly
+          // the language-specific split we are removing.
+          !REFLOW_SENTENCE_END.test(src[i - 1]))
+      ) {
+        out += "\n" + cur;
+        continue;
+      }
+      const joinTight = REFLOW_CJK.test(prev.slice(-1)) || REFLOW_CJK.test(cur[0]);
+      out += (joinTight ? "" : " ") + cur;
+    }
+    return out;
+  }
+
   function hideOverlayNow(ov, tEl, oEl) {
     clearTimeout(hideTimer);
     hideTimer = null;
@@ -417,7 +473,10 @@
     clearTimeout(hideTimer);
     hideTimer = null;
     ov.style.display = "flex";
-    tEl.textContent = currentTranslated || "";
+    // Reflow at display time rather than when the translation is stored, so
+    // translations already in the cache get it too. The original row keeps
+    // the source's own line layout.
+    tEl.textContent = reflowTranslation(currentTranslated, currentOriginal);
     oEl.textContent = settings.showOriginal ? currentOriginal || "" : "";
     // Apply user-configurable font to the translated row. The original row
     // inherits the family but stays proportionally smaller.
