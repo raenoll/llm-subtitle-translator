@@ -551,24 +551,75 @@
     positionOverlayToVideo();
   }
 
+  // Every root the hide rule has been planted into, so it can be lifted again.
+  const HIDE_STYLE_ID = "llm-subtitle-hide-native";
+  const hideStyleRoots = new Set();
+
+  function findHideStyle(root) {
+    return root.getElementById
+      ? root.getElementById(HIDE_STYLE_ID)
+      : root.querySelector?.(`#${HIDE_STYLE_ID}`) || null;
+  }
+
   function hideNativeSubtitles(on) {
-    const styleId = "llm-subtitle-hide-native";
-    let el = document.getElementById(styleId);
     if (!on) {
-      if (el) el.remove();
+      for (const root of hideStyleRoots) findHideStyle(root)?.remove();
+      hideStyleRoots.clear();
+      document.getElementById(HIDE_STYLE_ID)?.remove();
       return;
     }
-    if (el) return;
-    el = document.createElement("style");
-    el.id = styleId;
     const selectors = platform.containerSelectors.filter(Boolean).join(", ");
-    // Use opacity so the native subtitle's background box disappears too
-    // (Disney+ renders an opaque black box behind its cues).
-    el.textContent = selectors
-      ? `${selectors} { opacity: 0 !important; }`
-      : "";
-    document.documentElement.appendChild(el);
+    if (!selectors) return;
+    // A <style> in the document cannot cross a shadow boundary. Cue extraction
+    // walks shadow roots to FIND cues (collectNativeCueElements), so on a player
+    // that renders captions inside one — Disney+'s web player is built from web
+    // components — the cue is read and translated but was never hidden, and the
+    // source line stays on screen under the translation. Plant the same rule in
+    // every root that currently holds a cue, not just the document.
+    const roots = new Set([document]);
+    for (const el of nativeCueElements()) {
+      const root = el.getRootNode?.();
+      if (root && root !== document && root.host) roots.add(root);
+    }
+    for (const root of roots) {
+      if (!findHideStyle(root)) {
+        const style = document.createElement("style");
+        style.id = HIDE_STYLE_ID;
+        // Use opacity so the native subtitle's background box disappears too
+        // (Disney+ renders an opaque black box behind its cues).
+        style.textContent = `${selectors} { opacity: 0 !important; }`;
+        (root === document ? document.documentElement : root).appendChild(style);
+        log(
+          root === document
+            ? "native subtitles hidden"
+            : "native subtitles hidden (inside a shadow root)"
+        );
+      }
+      hideStyleRoots.add(root);
+    }
   }
+
+  // What the page is actually showing, not what we asked for. The old version
+  // only recorded that a rule was injected, so a rule that could not reach the
+  // cue failed completely silently.
+  function nativeCueStats() {
+    const els = nativeCueElements();
+    let visible = 0;
+    let inShadow = 0;
+    for (const el of els) {
+      const root = el.getRootNode?.();
+      if (root && root !== document && root.host) inShadow++;
+      if (
+        (el.textContent || "").trim() &&
+        parseFloat(getComputedStyle(el).opacity || "1") > 0
+      ) {
+        visible++;
+      }
+    }
+    return { total: els.length, visible, inShadow };
+  }
+
+  let lastVisibleNative = 0;
 
   // -------------- DOM helpers --------------
   function* walkAllElements(root) {
@@ -1443,6 +1494,26 @@
       // from lines we can see, so the timeline path stops missing.
       calibrateTimeline(text);
       handleCueChange(text);
+      // Re-assert hiding every tick. renderOverlay only runs on cue or
+      // settings changes, and players re-create their subtitle nodes — and
+      // sometimes the shadow root holding them — so a fresh root needs its own
+      // copy of the rule. Not while standing down for a skip-list cue, where
+      // the native subtitle is meant to show.
+      if (
+        settings?.enabled &&
+        !(currentOriginal && shouldSkipTranslation(currentOriginal))
+      ) {
+        hideNativeSubtitles(true);
+        const stats = nativeCueStats();
+        if (stats.visible && !lastVisibleNative) {
+          warn(
+            `hide rule is in place, but ${stats.visible} native cue element(s) ` +
+              `are STILL VISIBLE (${stats.inShadow} inside a shadow root) — ` +
+              `the source line shows under the translation`
+          );
+        }
+        lastVisibleNative = stats.visible;
+      }
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
       positionOverlayToVideo();
@@ -1521,6 +1592,7 @@
       timelineOffset: offsetLocked ? timelineOffset : null,
       currentOriginal: (currentOriginal || "").slice(0, 60),
       currentTranslated: (currentTranslated || "").slice(0, 60),
+      nativeCues: nativeCueStats(),
       logs: logBuffer.slice(-200),
     });
     return false;

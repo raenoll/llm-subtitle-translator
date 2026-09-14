@@ -223,6 +223,28 @@ function summarize(d) {
       `⚠️ 当前字幕语种「${d.sessionLanguage}」在「不翻译的语言」列表里，会被刻意跳过。`
     );
   }
+  // Whether the page's own subtitle is actually hidden. Put a failure FIRST:
+  // the panel colours itself from the first line, and a working timeline must
+  // not make the box go green while the source line is still on screen.
+  const nc = d.nativeCues;
+  if (nc && nc.visible > 0) {
+    lines.unshift(
+      `❌ 原生字幕没有被隐藏：${nc.visible} 个字幕元素仍然可见` +
+        (nc.inShadow ? `（其中 ${nc.inShadow} 个在 shadow root 里）` : "") +
+        `。所以译文下面还能看到原文，开了「显示原文」就会出现两行原文。`
+    );
+  } else if (nc && nc.total === 0 && d.currentTranslated) {
+    lines.push(
+      "⚠️ 正在显示译文，但页面上一个原生字幕元素都没匹配到。" +
+        "这说明该平台的字幕选择器可能已经过时，原文无法被隐藏。"
+    );
+  } else if (nc && nc.total > 0) {
+    lines.push(
+      `原生字幕已隐藏（${nc.total} 个元素` +
+        (nc.inShadow ? `，${nc.inShadow} 个在 shadow root 里` : "") +
+        `）`
+    );
+  }
   lines.push(
     `平台 ${d.platform} · 字幕语种 ${d.sessionLanguage || "未确定"} · ` +
       `目标 ${d.targetLanguage}`
