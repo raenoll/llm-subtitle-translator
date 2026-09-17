@@ -218,7 +218,18 @@
   // identified as (via kana, hangul, Cyrillic, Latin, or an xml:lang from a
   // captured subtitle file), and fall back to it for ambiguous lines.
   const TRADITIONAL_MARKERS = /[繁體國學愛們會個時這萬對發頭來說麼這個話請過點時當開關長無師寫聽車馬龍樓嗎見讀書現實內對應動進經濟經過機構參與飛錢麵]/;
+  // Language of what is ON SCREEN. Display/diagnostics only — the skip decision
+  // no longer reads it for Chinese vs Japanese (see detectLang).
   let sessionLanguage = null; // reset on navigation
+  const KANA_RE = /[\u3040-\u309F\u30A0-\u30FF]/;
+  // Recently displayed lines that contain CJK/kana, oldest first.
+  const ONSCREEN_WINDOW = 12;
+  const recentCjkLines = []; // { key, kana }
+  // Language of each captured cue, by compareKey(text), from the file it came
+  // from. Only CJK-script languages are kept, because only they are ambiguous.
+  // null marks text found in two tracks with different languages.
+  const CJK_FILE_LANGS = new Set(["日本語", "简体中文", "繁體中文", "한국어"]);
+  const cueLangByKey = new Map();
 
   function setSessionLanguage(lang) {
     if (lang && sessionLanguage !== lang) {
@@ -227,41 +238,99 @@
     }
   }
 
+  // "ja" | "zh" | null, from the lines actually displayed recently.
+  function onScreenCjkTrack() {
+    const n = recentCjkLines.length;
+    if (!n) return null;
+    // The last few lines dominate, so switching subtitle tracks mid-video is
+    // picked up after about two lines instead of being outvoted by history
+    // from the previous track.
+    const last3 = recentCjkLines.slice(-3);
+    if (last3.length >= 3 && last3.every((l) => !l.kana)) return "zh";
+    if (recentCjkLines.slice(-4).filter((l) => l.kana).length >= 2) return "ja";
+    const kana = recentCjkLines.filter((l) => l.kana).length;
+    if (n >= 4) {
+      // Mixed recent evidence (e.g. one stray kana line in a Chinese track):
+      // use the whole window. Japanese subtitles put kana in most lines,
+      // Chinese ones almost never. In between, stay undecided and let the
+      // line speak for itself — never fall back to "any kana means Japanese"
+      // here, or a single song title in kana relabels a Chinese track.
+      const r = kana / n;
+      if (r >= 0.3) return "ja";
+      if (r <= 0.1) return "zh";
+      return null;
+    }
+    // Very little evidence yet: any kana seen on screen points at Japanese.
+    return kana > 0 ? "ja" : null;
+  }
+
+  // Pure: no side effects. It runs every tick, on every render and for every
+  // captured cue, so it must never change state.
   function detectLang(text) {
     if (!text) return "other";
     // Strong signals — these uniquely identify a language.
-    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
-      setSessionLanguage("日本語");
-      return "日本語";
-    }
-    if (/[\uAC00-\uD7AF]/.test(text)) {
-      setSessionLanguage("한국어");
-      return "한국어";
-    }
-    if (/[\u0400-\u04FF]/.test(text)) {
-      setSessionLanguage("Русский");
-      return "Русский";
-    }
-    if (/[\u0370-\u03FF]/.test(text)) {
-      setSessionLanguage("Ελληνικά");
-      return "Ελληνικά";
-    }
-    // CJK-only — ambiguous between Chinese and Japanese.
+    if (KANA_RE.test(text)) return "日本語";
+    if (/[\uAC00-\uD7AF]/.test(text)) return "한국어";
+    if (/[\u0400-\u04FF]/.test(text)) return "Русский";
+    if (/[\u0370-\u03FF]/.test(text)) return "Ελληνικά";
+    // Ideographs without kana — ambiguous between Chinese and Japanese.
+    //
+    // This used to defer to `sessionLanguage`, which anything could pin to
+    // 日本語 — one Japanese line, a prefetched Japanese subtitle file, or
+    // watching the Japanese track before switching to 繁體中文 — and only a
+    // video change could clear. Every Chinese line after that was classed as
+    // 日本語, missed the skip list, and got translated. Use evidence instead,
+    // strongest first.
     if (/[\u4E00-\u9FFF]/.test(text)) {
-      // If the session has already been firmly identified as Japanese /
-      // Korean (via an earlier line or the subtitle file's xml:lang), trust
-      // that over a naive Chinese classification.
-      if (sessionLanguage === "日本語") return "日本語";
+      const zh = TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
+      // 1. The subtitle file this exact line came from.
+      const fileLang = cueLangByKey.get(compareKey(text));
+      if (fileLang) return fileLang;
+      // 2. What the recently displayed lines look like.
+      const track = onScreenCjkTrack();
+      if (track === "ja") return "日本語";
+      if (track === "zh") return zh;
+      // 3. No usable evidence yet.
       if (sessionLanguage === "한국어") return "한국어";
-      return TRADITIONAL_MARKERS.test(text) ? "繁體中文" : "简体中文";
+      return zh;
     }
-    if (/[A-Za-z]/.test(text)) {
-      // Latin is ambiguous between English / Spanish / French / German etc.;
-      // we only set session when no prior stronger signal exists.
-      if (!sessionLanguage) setSessionLanguage("English");
-      return "English";
-    }
+    if (/[A-Za-z]/.test(text)) return "English";
     return "other";
+  }
+
+  // Record a line that is actually being shown. The only thing that feeds the
+  // on-screen evidence window and the displayed session language.
+  function observeOnScreenLine(text) {
+    if (!text) return;
+    if (/[\u3040-\u30FF\u3400-\u9FFF]/.test(text)) {
+      const key = compareKey(text);
+      if (!recentCjkLines.some((l) => l.key === key)) {
+        recentCjkLines.push({ key, kana: KANA_RE.test(text) });
+        if (recentCjkLines.length > ONSCREEN_WINDOW) recentCjkLines.shift();
+      }
+    }
+    const lang = detectLang(text);
+    if (lang === "other") return;
+    // A stray Latin line (a name, a sign) must not relabel a CJK track.
+    if (lang === "English" && sessionLanguage) return;
+    setSessionLanguage(lang);
+  }
+
+  // Skip-list entries are free text — presets or typed by hand. Compare on
+  // canonical keys so "繁体中文" typed by hand matches the detector's
+  // "繁體中文", and a bare "中文" / "Chinese" covers both scripts.
+  function langKeys(label) {
+    const s = String(label || "").trim().toLowerCase();
+    if (!s) return [];
+    if (/^(繁體中文|繁体中文|繁中|正體中文|正体中文|traditional chinese|zh-hant|zh-tw|zh-hk)$/.test(s)) return ["zh-hant"];
+    if (/^(简体中文|簡體中文|简中|簡中|simplified chinese|zh-hans|zh-cn|zh-sg)$/.test(s)) return ["zh-hans"];
+    if (/^(中文|chinese|zh)$/.test(s)) return ["zh-hans", "zh-hant"];
+    if (/^(日本語|日本语|日语|日文|japanese|ja)$/.test(s)) return ["ja"];
+    if (/^(한국어|韩语|韓語|韩文|korean|ko)$/.test(s)) return ["ko"];
+    if (/^(русский|俄语|russian|ru)$/.test(s)) return ["ru"];
+    if (/^(ελληνικά|希腊语|greek|el)$/.test(s)) return ["el"];
+    if (/^(english|英语|英文|en)$/.test(s)) return ["en"];
+    return [s];
   }
 
   // Convert a BCP-47 / ISO code (en, ja, ko, zh-TW, zh-CN, ru, el, etc.) into
@@ -287,7 +356,8 @@
   function shouldSkipTranslation(text) {
     const list = settings?.skipLanguages || [];
     if (!list.length) return false;
-    return list.includes(detectLang(text));
+    const skip = new Set(list.flatMap(langKeys));
+    return langKeys(detectLang(text)).some((k) => skip.has(k));
   }
 
   // -------------- overlay --------------
@@ -1017,6 +1087,7 @@
       renderOverlay();
       return;
     }
+    observeOnScreenLine(text);
     // Source language is in the user's skip list — no API call, renderOverlay
     // will stand down (Method B: let the native subtitle show through).
     if (shouldSkipTranslation(text)) {
@@ -1026,6 +1097,7 @@
       renderOverlay();
       return;
     }
+    log(`translating: detected ${detectLang(text)}, not in the skip list`);
     currentTranslated = "";
     renderOverlay();
 
@@ -1184,8 +1256,16 @@
     return out;
   }
 
-  function ingestParsedCues(cues) {
+  function ingestParsedCues(cues, lang) {
     if (!cues.length) return 0;
+    if (lang && CJK_FILE_LANGS.has(lang)) {
+      for (const c of cues) {
+        const k = compareKey(c.text);
+        const prev = cueLangByKey.get(k);
+        if (prev === undefined) cueLangByKey.set(k, lang);
+        else if (prev !== lang) cueLangByKey.set(k, null);
+      }
+    }
     let added = 0;
     for (const c of cues) {
       const key = `${c.start.toFixed(3)}|${c.end.toFixed(3)}|${c.text.slice(0, 32)}`;
@@ -1311,6 +1391,9 @@
     if (typeof d.text !== "string") return;
     const text = String(d.text || "");
     let cues = [];
+    // The language this FILE declares. Deliberately not the session language:
+    // players also fetch tracks the viewer did not pick.
+    let fileLang = null;
     if (text.startsWith("WEBVTT")) cues = parseWebVTT(text);
     else if (/<tt[\s>]/i.test(text)) {
       cues = parseTTML(text);
@@ -1319,21 +1402,21 @@
       // as Chinese later on.
       const langMatch =
         text.match(/xml:lang="([^"]+)"/i) || text.match(/\slang="([^"]+)"/i);
-      const display = langMatch ? langCodeToDisplay(langMatch[1]) : null;
-      if (display) setSessionLanguage(display);
+      fileLang = langMatch ? langCodeToDisplay(langMatch[1]) : null;
     } else if (/^\s*\{\s*"(wireMagic|events)"/.test(text)) {
       cues = parseYouTubeJSON3(text);
     } else if (/<transcript/i.test(text.slice(0, 200))) {
       cues = parseYouTubeXML(text);
     }
-    // YouTube embeds the source language in the timedtext URL (`&lang=ja` etc.)
-    if (!sessionLanguage && d.url) {
-      const m = d.url.match(/[?&]lang=([a-zA-Z-]+)/);
-      const display = m ? langCodeToDisplay(m[1]) : null;
-      if (display) setSessionLanguage(display);
+    // Subtitle URLs often name the track (`&lang=ja`, `….zh-Hant.vtt`).
+    if (!fileLang && d.url) {
+      const m =
+        d.url.match(/[?&]lang=([a-zA-Z-]+)/) ||
+        d.url.match(/[._-]((?:zh-(?:hant|hans|tw|cn|hk))|ja|ko)\.(?:vtt|ttml2?|dfxp|srt|xml)(?:[?#]|$)/i);
+      fileLang = m ? langCodeToDisplay(m[1]) : null;
     }
     if (cues.length) {
-      const added = ingestParsedCues(cues);
+      const added = ingestParsedCues(cues, fileLang);
       const sample = cues[0];
       info(`captured subtitle segment (${cues.length} cues, ${added} new) ` +
           `first cue: ${sample.start.toFixed(2)}s–${sample.end.toFixed(2)}s "${sample.text.slice(0, 40)}" ` +
@@ -1435,6 +1518,7 @@
     }
     if (match.text !== currentOriginal) {
       timelineServed++;
+      observeOnScreenLine(match.text);
       info("sync cue:", match.text);
       lastLoggedText = match.text;
       currentOriginal = match.text;
@@ -1657,6 +1741,8 @@
       cueList = [];
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
+      recentCjkLines.length = 0;
+      cueLangByKey.clear();
       info(`new video detected (${id}); cue library cleared, re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
