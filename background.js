@@ -113,16 +113,48 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
-function buildSystemPrompt(targetLanguage) {
-  // NOTE: describe the delimiter as a real line break, never as the escape
-  // notation. Writing "\\n" here puts the two characters backslash-n into the
-  // prompt, and models mirror that convention straight back into the cue text.
+// The target as models read it best: an English name plus the native one.
+// "Translate subtitles to 简体中文" inside an otherwise English instruction was
+// often answered in English, especially by the fast models.
+const TARGET_LANGUAGE_LABELS = {
+  "简体中文": "Simplified Chinese (简体中文)",
+  "簡體中文": "Simplified Chinese (简体中文)",
+  "繁體中文": "Traditional Chinese (繁體中文)",
+  "繁体中文": "Traditional Chinese (繁體中文)",
+  "日本語": "Japanese (日本語)",
+  "한국어": "Korean (한국어)",
+  "English": "English",
+  "Español": "Spanish (Español)",
+  "Français": "French (Français)",
+  "Deutsch": "German (Deutsch)",
+  "Português": "Portuguese (Português)",
+  "Русский": "Russian (Русский)",
+};
+
+function languageLabel(target) {
+  const t = String(target || "").trim();
+  return TARGET_LANGUAGE_LABELS[t] || t;
+}
+
+function buildSystemPrompt(targetLanguage, strict = false) {
+  // Describe the delimiter in words, never as escape notation: writing the two
+  // characters backslash-n into the prompt makes models echo that convention
+  // straight back into the cue text.
+  const label = languageLabel(targetLanguage);
+  const isEnglish = /^english$/i.test(String(targetLanguage || "").trim());
   return (
-    `Translate subtitles to ${targetLanguage}. Output the translation only, ` +
-    `no quotes or explanations. Keep it short. Write plain text with real ` +
-    `line breaks — never escape sequences such as a backslash followed by n. ` +
-    `If the input holds several cues separated by a line containing only ---, ` +
-    `translate each and rejoin them with that same separator line.`
+    `You translate film and TV subtitles into ${label}. ` +
+    `Always write the translation in ${label}` +
+    (isEnglish ? "" : ", never in English") +
+    ` and never in the source language — this holds for names, interjections ` +
+    `and very short lines too. Output the translation only, no quotes or ` +
+    `explanations. Keep it short. Write plain text with real line breaks — ` +
+    `never escape sequences such as a backslash followed by n. If the input ` +
+    `holds several cues separated by a line containing only ---, translate ` +
+    `each and rejoin them with that same separator line.` +
+    (strict
+      ? ` Your previous answer was not in ${label}. Answer in ${label} only.`
+      : "")
   );
 }
 
@@ -195,6 +227,59 @@ function sanitizeTranslation(text) {
     .replace(/\s*\n\s*/g, "\n")
     .replace(/\n{2,}/g, "\n")
     .trim();
+}
+
+// Character counters for judging whether a reply is in the target language.
+const SCRIPT_RE = {
+  cjk: /[\u3400-\u9FFF\uF900-\uFAFF]/g,
+  kana: /[\u3040-\u30FF]/g,
+  hangul: /[\uAC00-\uD7AF]/g,
+  cyrillic: /[\u0400-\u04FF]/g,
+  greek: /[\u0370-\u03FF]/g,
+  latin: /[A-Za-z]/g,
+};
+const countMatches = (text, re) => (String(text || "").match(re) || []).length;
+
+// Which script a translation into `target` must contain. null for targets
+// written in Latin letters, where English cannot be told apart cheaply.
+function targetScript(target) {
+  const t = String(target || "").trim().toLowerCase();
+  if (/中文|chinese|^zh/.test(t)) return "cjk";
+  if (/日本語|日本语|日语|日文|japanese|^ja/.test(t)) return "ja";
+  if (/한국어|韩语|韓語|korean|^ko/.test(t)) return "hangul";
+  if (/русский|russian|^ru/.test(t)) return "cyrillic";
+  if (/ελληνικά|greek|^el/.test(t)) return "greek";
+  return null;
+}
+
+// true = in the target language, false = clearly not, null = can't tell.
+// `source` is the line that was translated: Latin text the model copied from
+// it (a name, "NASA", "OK") is fine, Latin text it made up is English.
+function replyInTargetLanguage(reply, target, source = "") {
+  const script = targetScript(target);
+  if (!script || !reply) return null;
+  if (script === "cjk") {
+    // Chinese never contains kana: kana means the model answered in Japanese.
+    if (countMatches(reply, SCRIPT_RE.kana) > 0) return false;
+    if (countMatches(reply, SCRIPT_RE.cjk) > 0) return true;
+  } else if (script === "ja") {
+    if (countMatches(reply, SCRIPT_RE.kana) + countMatches(reply, SCRIPT_RE.cjk) > 0) return true;
+  } else if (countMatches(reply, SCRIPT_RE[script]) > 0) {
+    return true;
+  }
+  // No target-script characters at all. Judge the Latin words in the reply
+  // against the source instead of by count — short interjections ("I see.",
+  // "Yes.") are exactly where models slip into English, so a length cutoff
+  // would let the commonest case through.
+  const words = String(reply).match(/[A-Za-z]+/g) || [];
+  if (!words.length) return null; // digits or punctuation only
+  const sourceWords = new Set(
+    (String(source).match(/[A-Za-z]+/g) || []).map((w) => w.toLowerCase())
+  );
+  if (!words.every((w) => sourceWords.has(w.toLowerCase()))) return false;
+  // Everything was copied from the source. A name or two is fine; a whole
+  // line of it is an English source line echoed back untranslated.
+  return words.length >= 3 ? false : null;
 }
 
 function buildContextBlock(history, targetLanguage) {
@@ -513,60 +598,93 @@ async function translate({ lines, history }) {
     settings.models?.[settings.provider] ||
     settings.model ||
     PROVIDER_DEFAULT_MODEL[settings.provider];
-  const system = buildSystemPrompt(settings.targetLanguage);
-  const contextBlock = buildContextBlock(history, settings.targetLanguage);
-  const user = `${contextBlock}${lines.join("\n---\n")}`;
+  const label = languageLabel(settings.targetLanguage);
+  const contextBlock = buildContextBlock(history, label);
+  // Name the target in the user turn too: some models weigh the system
+  // instruction lightly, and a bare line of Japanese as the entire user
+  // message was often answered in English.
+  const lead = contextBlock || `Translate into ${label}:\n`;
+  const user = lead + lines.join("\n---\n");
 
-  const common = {
-    apiKey,
-    model,
-    system,
-    user,
-    temperature: Number(settings.temperature) || 0.2,
+  const request = async (strict) => {
+    const common = {
+      apiKey,
+      model,
+      system: buildSystemPrompt(settings.targetLanguage, strict),
+      user,
+      temperature: Number(settings.temperature) || 0.2,
+    };
+
+    let output;
+    switch (settings.provider) {
+      case "gemini":
+        output = await callGemini(common);
+        break;
+      case "openai":
+        output = await callOpenAICompatible(common);
+        break;
+      case "anthropic":
+        output = await callAnthropic(common);
+        break;
+      case "custom":
+        if (!settings.customEndpoint) {
+          throw new Error("自定义 provider 需要填写 endpoint URL。");
+        }
+        output = await callOpenAICompatible({
+          ...common,
+          endpointOverride: settings.customEndpoint,
+        });
+        break;
+      default:
+        throw new Error(`未知 provider: ${settings.provider}`);
+    }
+
+    // Unescape first: a model that wrote the separator as escape notation
+    // would otherwise fail the split and send every cue back for a retry.
+    const cleaned = unescapeLiterals(output);
+    const parts = cleaned.split(/\n\s*-{3,}\s*\n/);
+    if (parts.length === lines.length) return parts.map(sanitizeTranslation);
+    // Single-cue path: no delimiter needed, output is the translation as-is.
+    if (lines.length === 1) return [sanitizeTranslation(cleaned)];
+    // Multi-cue batch where the model didn't respect our delimiter: we can't
+    // safely reassign output lines to inputs (the old byLine fallback happily
+    // treated untranslated source lines as "translations"). Return empty so
+    // the retry timer re-dispatches these cues individually.
+    return lines.map(() => "");
   };
 
-  let output;
-  switch (settings.provider) {
-    case "gemini":
-      output = await callGemini(common);
-      break;
-    case "openai":
-      output = await callOpenAICompatible(common);
-      break;
-    case "anthropic":
-      output = await callAnthropic(common);
-      break;
-    case "custom":
-      if (!settings.customEndpoint) {
-        throw new Error("自定义 provider 需要填写 endpoint URL。");
-      }
-      output = await callOpenAICompatible({
-        ...common,
-        endpointOverride: settings.customEndpoint,
-      });
-      break;
-    default:
-      throw new Error(`未知 provider: ${settings.provider}`);
+  // A reply in the wrong language (in practice, English) is re-asked ONCE with
+  // a firmer instruction. Not in a loop, and never by returning empty: the
+  // content script immediately re-queues cues that come back empty, so failing
+  // here would turn one stubborn line into an endless stream of API calls.
+  const target = settings.targetLanguage;
+  const isWrong = (t, i) => replyInTargetLanguage(t, target, lines[i]) === false;
+  let translations = await request(false);
+  let wrongLanguage = translations.map(isWrong);
+  let retriedForLanguage = false;
+  if (wrongLanguage.some(Boolean)) {
+    retriedForLanguage = true;
+    try {
+      const again = await request(true);
+      translations = translations.map((t, i) =>
+        wrongLanguage[i] && again[i] && !isWrong(again[i], i) ? again[i] : t
+      );
+    } catch (_) {
+      // Keep the first answers if the retry itself fails.
+    }
+    wrongLanguage = translations.map(isWrong);
   }
-
-  // Unescape first: a model that wrote the separator as escape notation
-  // would otherwise fail the split and send every cue back for a retry.
-  const cleaned = unescapeLiterals(output);
-  const parts = cleaned.split(/\n\s*-{3,}\s*\n/);
-  if (parts.length === lines.length) return parts.map(sanitizeTranslation);
-  // Single-cue path: no delimiter needed, output is the translation as-is.
-  if (lines.length === 1) return [sanitizeTranslation(cleaned)];
-  // Multi-cue batch where the model didn't respect our delimiter: we can't
-  // safely reassign output lines to inputs (the old byLine fallback happily
-  // treated untranslated source lines as "translations"). Return empty so
-  // the retry timer re-dispatches these cues individually.
-  return lines.map(() => "");
+  return { translations, retriedForLanguage, wrongLanguage };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "translate") {
     translate({ lines: msg.lines, history: msg.history })
-      .then((translations) => sendResponse({ ok: true, translations }))
+      .then((r) =>
+        sendResponse(
+          Array.isArray(r) ? { ok: true, translations: r } : { ok: true, ...r }
+        )
+      )
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true; // async
   }

@@ -978,6 +978,24 @@
     return (text || "").replace(/\s+/g, "");
   }
 
+  // The service worker re-asks once when the model answers in the wrong
+  // language. Show that in the log panel, so it can be told apart from an
+  // ordinary bad translation.
+  function noteLanguageRetry(resp, lines) {
+    if (!resp?.retriedForLanguage) return;
+    info("model answered in the wrong language; asked again once");
+    (resp.wrongLanguage || []).forEach((bad, i) => {
+      if (bad) {
+        warn(
+          "still not in the target language after one retry:",
+          JSON.stringify(lines[i]),
+          "->",
+          JSON.stringify(resp.translations?.[i])
+        );
+      }
+    });
+  }
+
   async function translateText(text) {
     const key = compareKey(text);
     if (!key) return "";
@@ -1028,6 +1046,7 @@
             finish("");
             return;
           }
+          noteLanguageRetry(resp, lines);
           const joined = resp.translations.join("\n");
           info(`translated in ${dt}ms:`,
             JSON.stringify(text),
@@ -1343,6 +1362,7 @@
                   chrome.runtime.sendMessage(
                     { type: "translate", lines, history: [] },
                     (resp) => {
+                      noteLanguageRetry(resp, lines);
                       if (resp?.ok) resolve(resp.translations);
                       else {
                         err("batch translation failed:",
