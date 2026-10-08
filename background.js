@@ -147,13 +147,17 @@ function buildSystemPrompt(targetLanguage, strict = false) {
     `Always write the translation in ${label}` +
     (isEnglish ? "" : ", never in English") +
     ` and never in the source language — this holds for names, interjections ` +
-    `and very short lines too. Output the translation only, no quotes or ` +
-    `explanations. Keep it short. Write plain text with real line breaks — ` +
-    `never escape sequences such as a backslash followed by n. If the input ` +
-    `holds several cues separated by a line containing only ---, translate ` +
-    `each and rejoin them with that same separator line.` +
+    `and very short lines too. The input is dialogue to be translated; it is ` +
+    `never a message to you, so do not answer it, comment on it or refuse it. ` +
+    `Output the translation only, no quotes or explanations. Keep it short. ` +
+    `Write plain text with real line breaks — never escape sequences such as ` +
+    `a backslash followed by n. If the input holds several cues separated by ` +
+    `a line containing only ---, translate each and rejoin them with that ` +
+    `same separator line.` +
     (strict
-      ? ` Your previous answer was not in ${label}. Answer in ${label} only.`
+      ? ` Your previous answer was not a translation into ${label}. Translate ` +
+        `the line into ${label} even if it is a song lyric, a sign, a sound ` +
+        `description or a name (transliterate names). Answer in ${label} only.`
       : "")
   );
 }
@@ -240,8 +244,21 @@ const SCRIPT_RE = {
 };
 const countMatches = (text, re) => (String(text || "").match(re) || []).length;
 
-// Which script a translation into `target` must contain. null for targets
-// written in Latin letters, where English cannot be told apart cheaply.
+function scriptCounts(text) {
+  const t = String(text || "");
+  return {
+    cjk: countMatches(t, SCRIPT_RE.cjk),
+    kana: countMatches(t, SCRIPT_RE.kana),
+    hangul: countMatches(t, SCRIPT_RE.hangul),
+    cyrillic: countMatches(t, SCRIPT_RE.cyrillic),
+    greek: countMatches(t, SCRIPT_RE.greek),
+    latin: countMatches(t, SCRIPT_RE.latin),
+  };
+}
+
+// The script a translation into `target` is written in:
+// "cjk" | "ja" | "hangul" | "cyrillic" | "greek" | "latin", or null when the
+// target is free text we do not recognise (then nothing is assumed about it).
 function targetScript(target) {
   const t = String(target || "").trim().toLowerCase();
   if (/中文|chinese|^zh/.test(t)) return "cjk";
@@ -249,6 +266,13 @@ function targetScript(target) {
   if (/한국어|韩语|韓語|korean|^ko/.test(t)) return "hangul";
   if (/русский|russian|^ru/.test(t)) return "cyrillic";
   if (/ελληνικά|greek|^el/.test(t)) return "greek";
+  if (
+    /^(english|español|spanish|français|french|deutsch|german|português|portuguese|italiano|italian|nederlands|dutch|en|es|fr|de|pt|it|nl)(?![a-z])/.test(
+      t
+    )
+  ) {
+    return "latin";
+  }
   return null;
 }
 
@@ -258,15 +282,29 @@ function targetScript(target) {
 function replyInTargetLanguage(reply, target, source = "") {
   const script = targetScript(target);
   if (!script || !reply) return null;
+  const c = scriptCounts(reply);
+  let own;
+  let foreign;
   if (script === "cjk") {
-    // Chinese never contains kana: kana means the model answered in Japanese.
-    if (countMatches(reply, SCRIPT_RE.kana) > 0) return false;
-    if (countMatches(reply, SCRIPT_RE.cjk) > 0) return true;
+    // A Chinese line can quote a stray の; a Japanese sentence is a third to a
+    // half kana. Past this ratio the model answered in Japanese.
+    if (c.kana > 0 && c.kana / (c.kana + c.cjk) > 0.15) return false;
+    own = c.cjk;
+    foreign = c.hangul + c.cyrillic + c.greek;
   } else if (script === "ja") {
-    if (countMatches(reply, SCRIPT_RE.kana) + countMatches(reply, SCRIPT_RE.cjk) > 0) return true;
-  } else if (countMatches(reply, SCRIPT_RE[script]) > 0) {
-    return true;
+    own = c.cjk + c.kana;
+    foreign = c.hangul + c.cyrillic + c.greek;
+  } else if (script === "latin") {
+    own = c.latin;
+    foreign = c.cjk + c.kana + c.hangul + c.cyrillic + c.greek;
+  } else {
+    own = c[script];
+    foreign = c.cjk + c.kana + c.hangul + c.cyrillic + c.greek - own;
   }
+  if (foreign > own) return false; // mostly some other script
+  // English cannot be told from Spanish this cheaply.
+  if (script === "latin") return null;
+  if (own > 0) return true;
   // No target-script characters at all. Judge the Latin words in the reply
   // against the source instead of by count — short interjections ("I see.",
   // "Yes.") are exactly where models slip into English, so a length cutoff
@@ -280,6 +318,79 @@ function replyInTargetLanguage(reply, target, source = "") {
   // Everything was copied from the source. A name or two is fine; a whole
   // line of it is an English source line echoed back untranslated.
   return words.length >= 3 ? false : null;
+}
+
+const hasLetters = (s) => /\p{L}/u.test(String(s || ""));
+// Identity of a line ignoring case, spacing and punctuation.
+const echoKey = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "");
+
+// One-word utterances that are speech, never a name — an echo of one of these
+// is an untranslated line, not a proper noun the model chose to keep.
+const COMMON_ENGLISH = new Set(
+  (
+    "yes no yeah yep nope hello hi hey bye goodbye thanks sorry please what why " +
+    "who where when how which really right sure fine good great nice wow oh ah " +
+    "uh um hmm huh well wait stop go come look listen here there now never " +
+    "always maybe nothing something everything nobody everyone anyone someone " +
+    "help run quiet enough exactly absolutely definitely seriously honestly " +
+    "anyway whatever damn shit fuck god jesus christ sir madam mom dad mother " +
+    "father"
+  ).split(" ")
+);
+
+// A line of one or two Latin words that each carry a capital or a digit:
+// "NASA.", "Tom!", "Mr. Smith", "iPhone". Keeping such a line as it is can be
+// a legitimate translation; "Thank you." or "What?" kept as it is cannot.
+function looksLikeAName(source) {
+  const c = scriptCounts(source);
+  if (c.cjk + c.kana + c.hangul + c.cyrillic + c.greek > 0) return false;
+  const words = String(source).match(/[A-Za-z0-9]+/g) || [];
+  if (!words.length || words.length > 2) return false;
+  return words.every(
+    (w) => /[A-Z0-9]/.test(w) && !COMMON_ENGLISH.has(w.toLowerCase())
+  );
+}
+
+// Why a reply must not be shown, or null when it is acceptable.
+//   "empty"           nothing came back
+//   "echo"            the source handed back untranslated
+//   "wrong-language"  an answer, but not in the target language
+//   "kept"            a short name or acronym left as it is — worth one firmer
+//                     ask, acceptable if the model does it again
+function judgeReply(source, reply, target) {
+  const r = String(reply || "").trim();
+  if (!r) return "empty";
+  const verdict = replyInTargetLanguage(r, target, source);
+  const key = echoKey(source);
+  if (key && echoKey(r) === key) {
+    // Identical to the source. Fine only when the source needed no
+    // translating: it is already in the target script (你好 → 你好, or a kanji
+    // word that reads the same in Chinese). Never when it carries kana.
+    const kana = targetScript(target) === "cjk" && scriptCounts(r).kana > 0;
+    if (verdict === true && !kana) return null;
+    if (verdict === null && looksLikeAName(source)) return "kept";
+    return hasLetters(source) ? "echo" : null;
+  }
+  return verdict === false ? "wrong-language" : null;
+}
+
+// Google's translation endpoints have no prompt to firm up, so their output
+// gets the one judgement and no second ask.
+function judgePlain(lines, replies, target) {
+  const out = { translations: [], first: [], rejected: [], raw: [], asks: 1, detail: "" };
+  lines.forEach((line, i) => {
+    const t = sanitizeTranslation(replies[i] || "");
+    const v0 = hasLetters(line) ? judgeReply(line, t, target) : null;
+    const v = v0 === "kept" ? null : v0;
+    out.translations.push(v ? "" : t);
+    out.first.push(v);
+    out.rejected.push(v);
+    out.raw.push(v ? t.slice(0, 120) : null);
+  });
+  return out;
 }
 
 function buildContextBlock(history, targetLanguage) {
@@ -313,7 +424,20 @@ async function callGemini({ apiKey, model, system, user, temperature }) {
   }
   const data = await res.json();
   const parts = data?.candidates?.[0]?.content?.parts || [];
-  return parts.map((p) => p.text || "").join("").trim();
+  const text = parts.map((p) => p.text || "").join("").trim();
+  if (!text) {
+    // A blocked prompt or a filtered answer comes back as HTTP 200 with no
+    // text. Carry the reason, so it is neither mistaken for a transport
+    // failure nor for a translation that happens to be empty.
+    const why =
+      data?.promptFeedback?.blockReason ||
+      data?.candidates?.[0]?.finishReason ||
+      "no content";
+    const e = new Error(`Gemini returned no text (${why})`);
+    e.emptyReply = true;
+    throw e;
+  }
+  return text;
 }
 
 async function callOpenAICompatible({
@@ -552,7 +676,7 @@ async function callAnthropic({ apiKey, model, system, user, temperature }) {
     .trim();
 }
 
-async function translate({ lines, history }) {
+async function translate({ lines, history, attempt }) {
   const settings = await getSettings();
   const apiKey =
     settings.apiKeys?.[settings.provider] || settings.apiKey || "";
@@ -571,9 +695,7 @@ async function translate({ lines, history }) {
       targetCode,
       lines,
     });
-    if (translations.length === lines.length)
-      return translations.map(sanitizeTranslation);
-    return lines.map((_, i) => sanitizeTranslation(translations[i] || ""));
+    return judgePlain(lines, translations, settings.targetLanguage);
   }
   if (settings.provider === "google-translate-v3") {
     const targetCode = googleLangCode(settings.targetLanguage);
@@ -589,9 +711,7 @@ async function translate({ lines, history }) {
       targetCode,
       lines,
     });
-    if (translations.length === lines.length)
-      return translations.map(sanitizeTranslation);
-    return lines.map((_, i) => sanitizeTranslation(translations[i] || ""));
+    return judgePlain(lines, translations, settings.targetLanguage);
   }
 
   const model =
@@ -606,13 +726,22 @@ async function translate({ lines, history }) {
   const lead = contextBlock || `Translate into ${label}:\n`;
   const user = lead + lines.join("\n---\n");
 
+  // Which round of attempts this is for the line (0 = first). Later rounds are
+  // firm from the start and sample warmer: at a low temperature a model that
+  // echoed a line once tends to echo it identically every time.
+  const round = Math.max(0, Math.floor(Number(attempt) || 0));
+  const temperature = Math.min(
+    1,
+    (Number(settings.temperature) || 0.2) + 0.3 * round
+  );
+
   const request = async (strict) => {
     const common = {
       apiKey,
       model,
       system: buildSystemPrompt(settings.targetLanguage, strict),
       user,
-      temperature: Number(settings.temperature) || 0.2,
+      temperature,
     };
 
     let output;
@@ -653,33 +782,81 @@ async function translate({ lines, history }) {
     return lines.map(() => "");
   };
 
-  // A reply in the wrong language (in practice, English) is re-asked ONCE with
-  // a firmer instruction. Not in a loop, and never by returning empty: the
-  // content script immediately re-queues cues that come back empty, so failing
-  // here would turn one stubborn line into an endless stream of API calls.
-  const target = settings.targetLanguage;
-  const isWrong = (t, i) => replyInTargetLanguage(t, target, lines[i]) === false;
-  let translations = await request(false);
-  let wrongLanguage = translations.map(isWrong);
-  let retriedForLanguage = false;
-  if (wrongLanguage.some(Boolean)) {
-    retriedForLanguage = true;
+  // A blocked or empty answer is a verdict on the line, not a transport error.
+  let emptyDetail = "";
+  const ask = async (strict) => {
     try {
-      const again = await request(true);
-      translations = translations.map((t, i) =>
-        wrongLanguage[i] && again[i] && !isWrong(again[i], i) ? again[i] : t
-      );
-    } catch (_) {
-      // Keep the first answers if the retry itself fails.
+      return await request(strict);
+    } catch (e) {
+      if (!e?.emptyReply) throw e;
+      emptyDetail = e.message;
+      return lines.map(() => "");
     }
-    wrongLanguage = translations.map(isWrong);
+  };
+
+  // Every reply is judged before it can leave this function. A line whose
+  // reply is the source handed back, is in the wrong language, or is empty is
+  // asked once more with a firmer instruction; if that fails too, the line
+  // comes back EMPTY together with the reason. It is never passed on to be
+  // displayed — passing it on is what put whole source-language lines on
+  // screen.
+  //
+  // The caller owns the retry schedule (a few rounds with a back-off), so one
+  // stubborn line cannot turn into an endless stream of requests.
+  const target = settings.targetLanguage;
+  // Nothing to translate (♪, …, 1985): hand it back without spending a request.
+  const passthrough = lines.map((l) => !hasLetters(l));
+  const translations = lines.map((l, i) =>
+    passthrough[i] ? String(l).trim() : ""
+  );
+  const first = lines.map(() => null); // what was wrong with the first reply
+  const rejected = lines.map(() => null); // why the line is withheld, if it is
+  const raw = lines.map(() => null); // the first reply, when it was refused
+  let asks = 0;
+  if (!passthrough.every(Boolean)) {
+    const replies = await ask(round > 0);
+    asks++;
+    const verdicts = replies.map((r, i) =>
+      passthrough[i] ? null : judgeReply(lines[i], r, target)
+    );
+    verdicts.forEach((v, i) => {
+      first[i] = v;
+      if (v) raw[i] = String(replies[i] || "").slice(0, 120);
+    });
+    let again = null;
+    if (verdicts.some(Boolean)) {
+      try {
+        again = await ask(true);
+        asks++;
+      } catch (_) {
+        // The second ask failed outright; judge on the first alone.
+      }
+    }
+    lines.forEach((line, i) => {
+      if (passthrough[i]) return;
+      const v1 = verdicts[i];
+      if (!v1) {
+        translations[i] = replies[i];
+        return;
+      }
+      const v2 = again ? judgeReply(line, again[i], target) : v1;
+      if (again && (!v2 || v2 === "kept")) {
+        // Fixed on the second ask — or the model insists on keeping a short
+        // name or acronym as it is, which is a translation choice.
+        translations[i] = again[i];
+      } else if (v1 === "kept") {
+        translations[i] = replies[i];
+      } else {
+        rejected[i] = v2 && v2 !== "kept" ? v2 : v1;
+      }
+    });
   }
-  return { translations, retriedForLanguage, wrongLanguage };
+  return { translations, first, rejected, raw, asks, detail: emptyDetail };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "translate") {
-    translate({ lines: msg.lines, history: msg.history })
+    translate({ lines: msg.lines, history: msg.history, attempt: msg.attempt })
       .then((r) =>
         sendResponse(
           Array.isArray(r) ? { ok: true, translations: r } : { ok: true, ...r }

@@ -186,48 +186,71 @@ $("nativeFontRefresh").addEventListener("click", refreshNativeFont);
 
 function summarize(d) {
   const lines = [];
-  const live = d.servedLive || 0;
-  const timeline = d.servedByTimeline || 0;
-  const total = live + timeline;
+  const st = d.stats || {};
+  const instant = st.instant || 0;
+  const waited = st.waited || 0;
+  const total = instant + waited;
 
+  // Display always follows the page's own cue; pre-translation helps by having
+  // the answer cached before the line appears. So the useful question is how
+  // many lines were ready in time.
   if (!total && !d.capturedCues) {
-    // Nothing has played yet — say so rather than blaming the capture.
-    lines.push("ℹ️ 还没有显示过字幕。请先播放一段有字幕的内容，再回来刷新。");
+    lines.push("ℹ️ 还没有显示过需要翻译的字幕。请先播放一段有字幕的内容，再回来刷新。");
+  } else if (!total) {
+    lines.push(
+      `ℹ️ 已抓到 ${d.capturedCues} 条字幕（翻译好 ${d.preTranslated} 条），还没有显示过需要翻译的台词。`
+    );
   } else if (!d.capturedCues) {
     lines.push(
       "❌ 预翻译库是空的——一条字幕都没抓到。每句都得等台词出现后才现场翻译，" +
-        "所以长句会迟到、短句会整句消失。"
+        "所以长句会迟到、短句可能来不及显示。"
     );
-  } else if (total && live > timeline) {
+  } else if (waited > instant) {
     lines.push(
-      `⚠️ 抓到了 ${d.capturedCues} 条字幕（已翻译 ${d.preTranslated} 条），` +
-        `但显示仍以现场翻译为主（时间轴 ${timeline} 句 / 现场 ${live} 句）。` +
-        (d.timelineOffset === null
-          ? "时间轴基准尚未校准，所以按时间取译文一直落空。"
-          : `时间轴偏移已校准为 ${d.timelineOffset.toFixed(2)}s。`)
+      `⚠️ 抓到了 ${d.capturedCues} 条字幕（翻译好 ${d.preTranslated} 条），` +
+        `但多数台词出现时译文还没备好（已备好 ${instant} 句 / 现场等待 ${waited} 句）。`
+    );
+  } else {
+    lines.push(
+      `✅ 预翻译在起作用：${instant} 句出现时译文已备好，${waited} 句需要现场翻译。` +
+        `已抓到 ${d.capturedCues} 条、翻译好 ${d.preTranslated} 条。`
+    );
+  }
+
+  // Who is responsible when a line goes wrong: the model, the network, or a
+  // setting of this extension.
+  const bad = (st.echo || 0) + (st.wrongLanguage || 0) + (st.empty || 0);
+  if (bad) {
+    lines.push(
+      `模型：首次回答不能用 ${bad} 次（原样返回原文 ${st.echo || 0}、` +
+        `答成别的语言 ${st.wrongLanguage || 0}、没有内容 ${st.empty || 0}）。` +
+        `重问后挽回 ${st.recovered || 0} 次，仍不行而被扣下不显示 ${st.withheld || 0} 次` +
+        (d.retryingLines ? `；${d.retryingLines} 句稍后会再试` : "") +
+        (d.withheldLines ? `；${d.withheldLines} 句已放弃` : "") +
+        "。扣下的台词不显示任何内容，不会露出原文。"
     );
   } else if (total) {
+    lines.push("模型：到目前为止每次回答都可用。");
+  }
+  if (st.errors) {
+    lines.push(`请求：失败 ${st.errors} 次（网络、超时或接口报错），对应台词稍后重试。`);
+  }
+  const skipped = Object.entries(st.skipped || {});
+  if (skipped.length) {
     lines.push(
-      `✅ 预翻译在驱动显示：时间轴 ${timeline} 句 / 现场 ${live} 句，` +
-        `已抓到 ${d.capturedCues} 条、翻译好 ${d.preTranslated} 条。` +
-        (d.timelineOffset !== null
-          ? `时间轴偏移 ${d.timelineOffset.toFixed(2)}s。`
-          : "")
+      "插件：按「不翻译的语言」直接显示了原字幕——" +
+        skipped.map(([lang, n]) => `${lang} ${n} 句`).join("、") +
+        "。如果其中有不该跳过的语种，请检查该列表。"
     );
   }
 
   if (!d.enabled) lines.push("⚠️ 扩展当前是关闭状态。");
   if (!d.playerPage) lines.push("⚠️ 当前 URL 未被识别为播放页。");
-  if (d.sessionLanguage && (d.skipLanguages || []).includes(d.sessionLanguage)) {
-    lines.push(
-      `⚠️ 当前字幕语种「${d.sessionLanguage}」在「不翻译的语言」列表里，会被刻意跳过。`
-    );
-  }
   // Whether the page's own subtitle is actually hidden. Put a failure FIRST:
-  // the panel colours itself from the first line, and a working timeline must
-  // not make the box go green while the source line is still on screen.
+  // the panel colours itself from the first line, and nothing else going well
+  // should make the box green while the source line is still on screen.
   const nc = d.nativeCues;
-  if (nc && nc.visible > 0) {
+  if (nc && nc.visible > 0 && !d.showingNative) {
     lines.unshift(
       `❌ 原生字幕没有被隐藏：${nc.visible} 个字幕元素仍然可见` +
         (nc.inShadow ? `（其中 ${nc.inShadow} 个在 shadow root 里）` : "") +
@@ -238,7 +261,7 @@ function summarize(d) {
       "⚠️ 正在显示译文，但页面上一个原生字幕元素都没匹配到。" +
         "这说明该平台的字幕选择器可能已经过时，原文无法被隐藏。"
     );
-  } else if (nc && nc.total > 0) {
+  } else if (nc && nc.total > 0 && !d.showingNative) {
     lines.push(
       `原生字幕已隐藏（${nc.total} 个元素` +
         (nc.inShadow ? `，${nc.inShadow} 个在 shadow root 里` : "") +
@@ -656,9 +679,21 @@ $("testBtn").addEventListener("click", async () => {
     lines: ["Hello, world."],
     history: [],
   });
-  if (resp?.ok) {
+  if (resp?.ok && resp.translations?.[0]) {
     statusEl.textContent = `✓ 成功: ${resp.translations[0]}`;
     statusEl.className = "inline-status ok";
+  } else if (resp?.ok) {
+    // The request went through, but the reply was not a usable translation.
+    const why = {
+      echo: "把原文原样返回了",
+      "wrong-language": "回答不是目标语言",
+      empty: "没有返回内容",
+    }[resp.rejected?.[0]] || "没有返回内容";
+    statusEl.textContent =
+      `✗ 模型${why}` +
+      (resp.raw?.[0] ? `：${resp.raw[0]}` : "") +
+      (resp.detail ? `（${resp.detail}）` : "");
+    statusEl.className = "inline-status err";
   } else {
     statusEl.textContent = `✗ ${resp?.error || "未知错误"}`;
     statusEl.className = "inline-status err";

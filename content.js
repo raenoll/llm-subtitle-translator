@@ -185,6 +185,42 @@
   // pending entry never clears and THAT LINE never translates again — a
   // guaranteed missing subtitle. Bound it.
   const TRANSLATE_TIMEOUT_MS = 25000;
+
+  // ---- Lines that could not be translated ---------------------------------
+  // By compareKey: how many rounds a line has used and when the next may
+  // start. Shared by the on-screen path and the pre-translator, so neither can
+  // hammer the API over one stubborn line, and a refused line is retried later
+  // instead of being cached as blank — or shown in the source language.
+  const failures = new Map(); // key → { attempts, nextTryAt, reason }
+  const MAX_ROUNDS = 3;
+  const RETRY_DELAYS_MS = [4000, 30000]; // wait after round 1, after round 2
+  let batchWakeTimer = null;
+  // true while the line on screen is in a skip-list language. Decided once,
+  // when the line appears: re-deciding on every render let the answer flip
+  // mid-line as language evidence accumulated.
+  let currentSkip = false;
+  // Running totals for the diagnostics panel — who caused what.
+  const stats = {
+    instant: 0, // lines whose translation was ready when they appeared
+    waited: 0, // lines that had to be translated while on screen
+    echo: 0, // first reply was the source handed back
+    wrongLanguage: 0, // first reply was in some other language
+    empty: 0, // first reply was empty or blocked
+    recovered: 0, // …and the second ask fixed it
+    withheld: 0, // …and the second ask did not: the line was not shown
+    gaveUp: 0, // lines abandoned after MAX_ROUNDS
+    errors: 0, // transport failures and timeouts
+    skipped: {}, // lines left to the native subtitle, by detected language
+  };
+  const REASON_TEXT = {
+    echo: "returned the source line unchanged",
+    "wrong-language": "answered in a different language",
+    empty: "returned nothing",
+  };
+  // Everything goes through one cache now, including the pre-translator, and a
+  // long episode has well over 500 lines — a cap that small would evict
+  // pre-translated lines before they are ever shown.
+  const CACHE_MAX = 5000;
   let lastLoggedText = null;
   let cueSetAt = 0;
   const STALE_CUE_MS = 10000; // force-clear if the same cue persists this long
@@ -235,6 +271,9 @@
     if (lang && sessionLanguage !== lang) {
       sessionLanguage = lang;
       info("session language:", lang);
+      // Which captured lines count as skip-list lines may just have changed;
+      // let the pre-translator look at them again.
+      scheduleBatchTranslation();
     }
   }
 
@@ -510,8 +549,8 @@
     //   - Skip-language cue  → stand down: show the platform's native
     //     subtitle as-is, keep our overlay hidden (Method B).
     //   - Otherwise          → hide native, render via our overlay (Method A).
-    const isSkipping =
-      currentOriginal && shouldSkipTranslation(currentOriginal);
+    // currentSkip was decided when the line appeared; see handleCueChange.
+    const isSkipping = currentOriginal && currentSkip;
     if (isSkipping) {
       hideOverlayNow(overlay);
       hideNativeSubtitles(false);
@@ -755,17 +794,30 @@
     return els;
   }
 
+  // Our own overlay must never be read back as a native cue. Loose platform
+  // selectors such as [class*='subtitle'] (HBO Max, Apple TV+) match our
+  // llm-subtitle-* classes; reading our own Chinese back as "the subtitle"
+  // gets it classified as a skip-list language and the native line shown.
+  function isOwnOverlay(el) {
+    return !!el && (el.id === "llm-subtitle-overlay" ||
+      (typeof el.closest === "function" && !!el.closest("#llm-subtitle-overlay")));
+  }
+
   function collectNativeCueElements() {
     if (!platform.containerSelectors.length) return [];
     const joined = platform.containerSelectors.join(", ");
     const all = [];
     try {
-      document.querySelectorAll(joined).forEach((el) => all.push(el));
+      document.querySelectorAll(joined).forEach((el) => {
+        if (!isOwnOverlay(el)) all.push(el);
+      });
     } catch (_) {}
     for (const el of walkAllElements(document)) {
       if (el.shadowRoot) {
         try {
-          el.shadowRoot.querySelectorAll(joined).forEach((x) => all.push(x));
+          el.shadowRoot.querySelectorAll(joined).forEach((x) => {
+            if (!isOwnOverlay(x)) all.push(x);
+          });
         } catch (_) {}
       }
     }
@@ -978,29 +1030,87 @@
     return (text || "").replace(/\s+/g, "");
   }
 
-  // The service worker re-asks once when the model answers in the wrong
-  // language. Show that in the log panel, so it can be told apart from an
-  // ordinary bad translation.
-  function noteLanguageRetry(resp, lines) {
-    if (!resp?.retriedForLanguage) return;
-    info("model answered in the wrong language; asked again once");
-    (resp.wrongLanguage || []).forEach((bad, i) => {
-      if (bad) {
-        warn(
-          "still not in the target language after one retry:",
-          JSON.stringify(lines[i]),
-          "->",
-          JSON.stringify(resp.translations?.[i])
-        );
-      }
-    });
+  function mayTranslateNow(key) {
+    const f = failures.get(key);
+    return !f || (f.attempts < MAX_ROUNDS && Date.now() >= f.nextTryAt);
   }
 
-  async function translateText(text) {
+  // Charge a line one round. After MAX_ROUNDS it is left alone until the video
+  // changes; it then shows nothing, which is the point — never the source.
+  function noteFailure(key, reason, text) {
+    const f = failures.get(key) || { attempts: 0, nextTryAt: 0, reason: "" };
+    f.attempts++;
+    f.reason = reason;
+    const wait = RETRY_DELAYS_MS[f.attempts - 1];
+    f.nextTryAt = wait === undefined ? Infinity : Date.now() + wait;
+    failures.set(key, f);
+    if (f.attempts >= MAX_ROUNDS) {
+      stats.gaveUp++;
+      warn(
+        `gave up on a line after ${f.attempts} rounds (${reason}); it stays ` +
+          `hidden rather than showing the source:`,
+        JSON.stringify(text)
+      );
+    } else {
+      scheduleBatchWake();
+    }
+  }
+
+  // Bring the pre-translator back when the earliest back-off runs out.
+  function scheduleBatchWake() {
+    clearTimeout(batchWakeTimer);
+    batchWakeTimer = null;
+    let earliest = Infinity;
+    for (const c of cueList) {
+      if (c.translation !== null) continue;
+      const f = failures.get(compareKey(c.text));
+      if (f && f.attempts < MAX_ROUNDS) earliest = Math.min(earliest, f.nextTryAt);
+    }
+    if (earliest === Infinity) return;
+    batchWakeTimer = setTimeout(() => {
+      batchWakeTimer = null;
+      scheduleBatchTranslation();
+    }, Math.max(50, earliest - Date.now()));
+  }
+
+  // Record what the service worker found wrong with the model's first reply,
+  // and whether the second ask fixed it. This is the "was it the model?" log.
+  function accountReply(resp, text) {
+    const first = resp.first?.[0];
+    if (!first || first === "kept") return;
+    if (first === "echo") stats.echo++;
+    else if (first === "wrong-language") stats.wrongLanguage++;
+    else if (first === "empty") stats.empty++;
+    const what = REASON_TEXT[first] || first;
+    if (resp.rejected?.[0]) {
+      stats.withheld++;
+      warn(
+        `model ${what}, and again when asked a second time — line withheld:`,
+        JSON.stringify(text),
+        resp.raw?.[0] ? `| it said: ${JSON.stringify(resp.raw[0])}` : "",
+        resp.detail ? `| ${resp.detail}` : ""
+      );
+    } else {
+      stats.recovered++;
+      info(
+        `model ${what}; asked again and got a translation:`,
+        JSON.stringify(text),
+        resp.raw?.[0] ? `| first it said: ${JSON.stringify(resp.raw[0])}` : ""
+      );
+    }
+  }
+
+  // The one way a translation is obtained — for the line on screen (live) and
+  // for the pre-translator alike. Returns "" when there is none to show; only
+  // text the service worker accepted is ever cached or returned.
+  async function translateText(text, { live = true } = {}) {
     const key = compareKey(text);
     if (!key) return "";
     if (cache.has(key)) return cache.get(key);
     if (pending.has(key)) return pending.get(key);
+    // Refused recently: wait out the back-off. Out of rounds: leave it.
+    if (!mayTranslateNow(key)) return "";
+    const attempt = failures.get(key)?.attempts || 0;
 
     // Send the whole cue as ONE translation unit. Splitting on '\n' and then
     // joining batch entries with '\n---\n' confused some models: they'd
@@ -1009,7 +1119,8 @@
     const lines = [text];
     const t0 = Date.now();
     const promise = new Promise((resolve) => {
-      const n = Math.max(0, settings?.contextLines ?? 0);
+      // Context lines only make sense in playing order, i.e. for live lines.
+      const n = live ? Math.max(0, settings?.contextLines ?? 0) : 0;
       const historySlice = n > 0 ? history.slice(-n) : [];
       let settled = false;
       const finish = (value) => {
@@ -1018,54 +1129,80 @@
         clearTimeout(timer);
         resolve(value);
       };
+      // Every exit without a translation goes through here, so the line is
+      // always charged a round. That is what stops either caller from asking
+      // for the same line again in a tight loop.
+      const fail = (reason) => {
+        if (settled) return;
+        noteFailure(key, reason, text);
+        finish("");
+      };
+      const accept = (tr) => {
+        failures.delete(key);
+        cache.set(key, tr);
+        if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+      };
       const timer = setTimeout(() => {
+        stats.errors++;
         err(`translation timed out after ${TRANSLATE_TIMEOUT_MS}ms:`,
           JSON.stringify(text)
         );
-        finish("");
+        fail("timeout");
       }, TRANSLATE_TIMEOUT_MS);
       chrome.runtime.sendMessage(
-        {
-          type: "translate",
-          lines,
-          history: historySlice,
-        },
+        { type: "translate", lines, history: historySlice, attempt },
         (resp) => {
           const dt = Date.now() - t0;
-          if (chrome.runtime.lastError) {
-            err(`translation runtime error after ${dt}ms:`,
-              chrome.runtime.lastError.message
-            );
-            finish("");
+          const lastError = chrome.runtime.lastError;
+          if (settled) {
+            // Timed out earlier; a good answer that arrives late is still
+            // worth keeping for the next time the line comes round.
+            if (!lastError && resp?.ok && resp.translations?.[0]) {
+              accept(resp.translations[0]);
+            }
+            return;
+          }
+          if (lastError) {
+            stats.errors++;
+            err(`translation runtime error after ${dt}ms:`, lastError.message);
+            fail("error");
             return;
           }
           if (!resp?.ok) {
-            err(`translation failed after ${dt}ms:`,
-              resp?.error
-            );
-            finish("");
+            stats.errors++;
+            err(`translation failed after ${dt}ms:`, resp?.error);
+            fail("error");
             return;
           }
-          noteLanguageRetry(resp, lines);
-          const joined = resp.translations.join("\n");
-          info(`translated in ${dt}ms:`,
-            JSON.stringify(text),
-            "→",
-            JSON.stringify(joined)
-          );
-          cache.set(key, joined);
-          if (cache.size > 500) {
-            const firstKey = cache.keys().next().value;
-            cache.delete(firstKey);
+          accountReply(resp, text);
+          const tr = resp.translations?.[0] || "";
+          if (!tr) {
+            fail(resp.rejected?.[0] || "empty");
+            return;
           }
-          lines.forEach((src, i) => {
-            const tr = resp.translations[i];
-            if (src && tr) {
-              history.push({ source: src, translation: tr });
-              if (history.length > HISTORY_MAX) history.shift();
-            }
-          });
-          finish(joined);
+          accept(tr);
+          if (live) {
+            info(`translated in ${dt}ms:`,
+              JSON.stringify(text),
+              "→",
+              JSON.stringify(tr)
+            );
+            history.push({ source: text, translation: tr });
+            if (history.length > HISTORY_MAX) history.shift();
+          }
+          finish(tr);
+          // The line may be on screen right now with nothing under it — a
+          // retry that landed late, or a pre-translation finishing just after
+          // the line appeared. Show it.
+          if (
+            !currentSkip &&
+            !currentTranslated &&
+            currentOriginal &&
+            compareKey(currentOriginal) === key
+          ) {
+            currentTranslated = tr;
+            renderOverlay();
+          }
         }
       );
     });
@@ -1085,6 +1222,7 @@
     ) {
       currentOriginal = "";
       currentTranslated = "";
+      currentSkip = false;
       lastLoggedText = null;
       cueSetAt = 0;
       renderOverlay();
@@ -1101,30 +1239,42 @@
     }
     currentOriginal = text;
     cueSetAt = text ? Date.now() : 0;
+    // A new line never starts out showing anything: the translated row holds
+    // only text that came back from translateText().
+    currentTranslated = "";
+    currentSkip = false;
     if (!text) {
-      currentTranslated = "";
       renderOverlay();
       return;
     }
     observeOnScreenLine(text);
     // Source language is in the user's skip list — no API call, renderOverlay
-    // will stand down (Method B: let the native subtitle show through).
-    if (shouldSkipTranslation(text)) {
-      info(`skipped (${detectLang(text)} in skip list); showing native`
-      );
-      currentTranslated = text;
+    // stands down (Method B: let the native subtitle show through).
+    currentSkip = shouldSkipTranslation(text);
+    if (currentSkip) {
+      const lang = detectLang(text);
+      stats.skipped[lang] = (stats.skipped[lang] || 0) + 1;
+      info(`skipped (${lang} in skip list); showing native`);
       renderOverlay();
       return;
     }
+    const key = compareKey(text);
+    const ready = cache.has(key);
+    if (ready) stats.instant++;
+    else stats.waited++;
     log(`translating: detected ${detectLang(text)}, not in the skip list`);
-    currentTranslated = "";
     renderOverlay();
 
-    const now = Date.now();
-    if (now - lastTranslationAt < MIN_INTERVAL_MS) {
-      await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+    // MIN_INTERVAL_MS paces requests to the API, so only wait when one is
+    // actually about to be made — not for a line that is already cached or
+    // already in flight.
+    if (!ready && !pending.has(key)) {
+      const now = Date.now();
+      if (now - lastTranslationAt < MIN_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+      }
+      lastTranslationAt = Date.now();
     }
-    lastTranslationAt = Date.now();
 
     const captured = text;
     const translation = await translateText(text);
@@ -1314,18 +1464,16 @@
       // Keep draining while new cues keep being captured.
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        // Don't waste API calls on cues in the skip-translation list.
-        // Mark them as "translated" with their source text so time-sync /
-        // cache hits display them immediately.
-        for (const c of cueList) {
-          if (c.translation === null && shouldSkipTranslation(c.text)) {
-            c.translation = c.text;
-            cache.set(compareKey(c.text), c.text);
-          }
-        }
-        const pool = cueList.filter(
-          (c) => c.translation === null && !c.translating
-        );
+        // Skip-list lines are left alone — and deliberately NOT marked as
+        // translated. Which language a kanji-only line is in can change once
+        // more lines have been seen, and a line written off here as "Chinese,
+        // nothing to do" used to be cached with its own source text as its
+        // translation and shown that way for good.
+        const pool = cueList.filter((c) => {
+          if (c.translation !== null || c.translating) return false;
+          const key = compareKey(c.text);
+          return !!key && mayTranslateNow(key) && !shouldSkipTranslation(c.text);
+        });
         if (!pool.length) break;
         const videos = getVideos();
         const cur =
@@ -1342,58 +1490,45 @@
         // just keep ahead of playback and any stall puts the playhead in front
         // of the translated window.
         const MAX_CONCURRENT = 5;
-        // One cue per API call — no delimiter, no parser ambiguity. With
-        // 3 concurrent workers this still burns through the queue quickly.
-        const BATCH_SIZE = 1;
-        const workers = [];
+        const t0 = Date.now();
+        let filled = 0;
+        let charged = 0;
         let idx = 0;
+        const workers = [];
         for (let w = 0; w < MAX_CONCURRENT; w++) {
           workers.push(
             (async () => {
               while (idx < pool.length) {
-                const myIdx = idx;
-                idx += BATCH_SIZE;
-                const batch = pool.slice(myIdx, myIdx + BATCH_SIZE);
-                if (!batch.length) break;
-                batch.forEach((c) => (c.translating = true));
-                const lines = batch.map((c) => c.text);
-                const t0 = Date.now();
-                const translations = await new Promise((resolve) => {
-                  chrome.runtime.sendMessage(
-                    { type: "translate", lines, history: [] },
-                    (resp) => {
-                      noteLanguageRetry(resp, lines);
-                      if (resp?.ok) resolve(resp.translations);
-                      else {
-                        err("batch translation failed:",
-                          resp?.error
-                        );
-                        resolve(lines.map(() => ""));
-                      }
-                    }
-                  );
-                });
-                const dt = Date.now() - t0;
-                let filled = 0;
-                batch.forEach((c, i) => {
-                  const tr = translations[i] || "";
+                const c = pool[idx++];
+                const key = compareKey(c.text);
+                const before = failures.get(key)?.attempts || 0;
+                c.translating = true;
+                let tr = "";
+                try {
+                  // Same path as the line on screen: shared cache, shared
+                  // in-flight requests, time-out, validation and back-off.
+                  tr = await translateText(c.text, { live: false });
+                } finally {
                   c.translating = false;
-                  if (tr) {
-                    c.translation = tr;
-                    cache.set(compareKey(c.text), tr);
-                    filled++;
-                  } else {
-                    // Leave as null so the next scheduler pass retries.
-                    c.translation = null;
-                  }
-                });
-                info(`batch translated ${filled}/${batch.length} cues in ${dt}ms`
-                );
+                }
+                if (tr) {
+                  c.translation = tr;
+                  filled++;
+                } else if ((failures.get(key)?.attempts || 0) > before) {
+                  charged++;
+                }
               }
             })()
           );
         }
         await Promise.all(workers);
+        info(
+          `pre-translated ${filled}/${pool.length} cues in ${Date.now() - t0}ms` +
+            (charged ? ` (${charged} refused, will retry later)` : "")
+        );
+        // Nothing moved at all: whatever is left is waiting on something else.
+        // Stop rather than spin; the retry timers bring us back.
+        if (!filled && !charged) break;
       }
     } finally {
       batchSchedulerRunning = false;
@@ -1605,7 +1740,7 @@
       // the native subtitle is meant to show.
       if (
         settings?.enabled &&
-        !(currentOriginal && shouldSkipTranslation(currentOriginal))
+        !(currentOriginal && currentSkip)
       ) {
         hideNativeSubtitles(true);
         const stats = nativeCueStats();
@@ -1653,8 +1788,11 @@
     diagTimer = null;
     if (retryTimer) clearInterval(retryTimer);
     retryTimer = null;
+    // Forgetting the line means the next tick sees it as new and decides
+    // afresh — which is also how a changed skip list takes effect.
     currentOriginal = "";
     currentTranslated = "";
+    currentSkip = false;
     lastLoggedText = null;
     renderOverlay();
   }
@@ -1697,6 +1835,10 @@
       currentOriginal: (currentOriginal || "").slice(0, 60),
       currentTranslated: (currentTranslated || "").slice(0, 60),
       nativeCues: nativeCueStats(),
+      showingNative: !!(currentOriginal && currentSkip),
+      stats,
+      withheldLines: [...failures.values()].filter((f) => f.attempts >= MAX_ROUNDS).length,
+      retryingLines: [...failures.values()].filter((f) => f.attempts < MAX_ROUNDS).length,
       logs: logBuffer.slice(-200),
     });
     return false;
@@ -1763,6 +1905,10 @@
       sessionLanguage = null; // new video may be a different language
       recentCjkLines.length = 0;
       cueLangByKey.clear();
+      failures.clear();
+      currentSkip = false;
+      clearTimeout(batchWakeTimer);
+      batchWakeTimer = null;
       info(`new video detected (${id}); cue library cleared, re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
