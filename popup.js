@@ -25,7 +25,9 @@ async function load() {
   if (!s.apiKeys?.[s.provider] && !s.apiKey) {
     setStatus("未配置 API key，点击下方打开设置。", false);
   } else {
-    setStatus(`已启用 · ${s.provider}`);
+    // The backend by the name the dropdown shows, not by its internal id.
+    const chosen = $("provider").selectedOptions[0];
+    setStatus(`已启用 · ${chosen ? chosen.textContent : s.provider}`);
   }
 }
 

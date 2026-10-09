@@ -18,7 +18,7 @@
 2. 右上角开启 **开发者模式 / Developer mode**
 3. 点「加载已解压的扩展程序 / Load unpacked」，选择本目录 (`subtitle-translator/`)
 4. 点扩展图标 → 打开「完整设置」
-5. 选择 provider、填入 API Key、选目标语言
+5. 选择后端、填入 API Key、选目标语言
 6. 点「测试连接」确认能返回翻译
 7. 打开 Netflix / Disney+ 等，**先在平台里把原文字幕（例如英文）打开**，扩展就会自动接管
 

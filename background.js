@@ -670,14 +670,14 @@ async function callLLM(settings, request) {
       return callAnthropic(request);
     case "custom":
       if (!settings.customEndpoint) {
-        throw new Error("自定义 provider 需要填写 endpoint URL。");
+        throw new Error("自定义后端需要填写 Endpoint 地址。");
       }
       return callOpenAICompatible({
         ...request,
         endpointOverride: settings.customEndpoint,
       });
     default:
-      throw new Error(`未知 provider: ${settings.provider}`);
+      throw new Error(`未知后端：${settings.provider}`);
   }
 }
 
