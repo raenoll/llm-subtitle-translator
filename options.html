@@ -68,7 +68,7 @@
 
         <!-- Google Translate block: just an API Key -->
         <div class="provider-block" id="v2Block" hidden>
-          <p class="hint">基础模式：Google Translate 只负责把句子译出来，不接受任何指令。它速度快、结果稳定，也不会把台词当成对话来回答；但「统一人名译法」「上下文行数」和回答不合格时的重问对它都不起作用。想要这些功能请改用 Gemini、OpenAI、Claude 或自定义模型。</p>
+          <p class="hint">基础模式：Google Translate 只负责把句子译出来，不接受任何指令。它速度快、结果稳定，也不会把台词当成对话来回答；但同一视频内保持人名一致、「上下文行数」和回答不合格时的重问对它都不起作用。想要这些功能请改用 Gemini、OpenAI、Claude 或自定义模型。</p>
           <div class="row">
             <label>API Key</label>
             <div class="input-with-button">
@@ -98,22 +98,6 @@
           <label>上下文行数</label>
           <input id="contextLines" type="number" min="0" max="20" />
           <small class="hint">发送给模型的最近翻译行数，用于保持语气和代词一致。</small>
-        </div>
-        <div class="row">
-          <label>统一人名译法</label>
-          <label class="switch">
-            <input id="unifyNames" type="checkbox" />
-            <span class="slider"></span>
-          </label>
-          <small class="hint">翻译前先让模型从字幕里整理出人名、地名，各定一个译法，之后每句都照这个译法来，同一个名字不会一会儿译成 A、一会儿译成 B。每个视频会多发几次请求（大约每 500 句字幕一次）。仅对 Gemini / OpenAI / Claude / 自定义这几类模型生效，Google Translate 不支持。</small>
-        </div>
-        <div class="row">
-          <label>已记住的译名</label>
-          <div class="input-with-button">
-            <span id="nameMemoryCount" class="hint">—</span>
-            <button id="nameMemoryClear" type="button" class="ghost">清空</button>
-          </div>
-          <small class="hint">定下的译名记在本机，同一部剧的下一集沿用。某个译名不合适时可以清空，下次播放会重新定。</small>
         </div>
         <div class="row">
           <label>同时显示原文</label>

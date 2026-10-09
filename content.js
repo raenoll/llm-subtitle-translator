@@ -1176,17 +1176,15 @@
 
   // -------------- name glossary --------------
   // Each cue is translated in a request of its own, so left to itself the
-  // model spells the same name differently from one line to the next. The
-  // names are settled first (background.js: buildNameGlossary) and every line
-  // is then sent together with the renderings it has to use.
-  //   glossary    — this video: name as spelled in the subtitles → rendering
-  //   name memory — every rendering settled so far, kept in
-  //                 chrome.storage.local so the next episode spells the cast
-  //                 the same way. It is only OFFERED to the model, as "already
-  //                 fixed": a name enters `glossary` when the model finds it
-  //                 in this video's lines. A name from another title that is
-  //                 an ordinary word here is therefore not forced on anything.
-  const glossary = new Map();
+  // model spells the same name differently from one line to the next — it
+  // cannot follow "keep names consistent" when it never sees what it wrote
+  // before. So the names of the video being played are settled first
+  // (background.js: buildNameGlossary) and every line is then sent together
+  // with the renderings it has to use.
+  //
+  // All of it is internal and lasts as long as the video: there is no setting
+  // for it and nothing is kept once the video changes.
+  const glossary = new Map(); // name as spelled in the subtitles → rendering
   let glossaryTarget = ""; // the language those renderings are in
   let glossaryScan = null; // the scan in flight, if any
   let glossaryScans = 0; // scans started for this video
@@ -1201,14 +1199,8 @@
   const GLOSSARY_WAIT_MS = 15000;
   const GLOSSARY_REPLY_TIMEOUT_MS = 32000; // just over the worker's own limit
   const GLOSSARY_HINT_MAX = 16;
-  const NAME_MEMORY_KEY = "nameMemory";
-  const NAME_MEMORY_MAX = 1000;
   // Lines this close to being shown are translated without waiting for names.
   const IMMINENT_S = 20;
-
-  function unifyNamesOn() {
-    return settings?.unifyNames !== false && !glossaryUnsupported;
-  }
 
   // In scripts written with spaces a name has to stand as a word of its own
   // ("Rose" is not in "Rosemary"). Korean particles and Japanese suffixes
@@ -1230,7 +1222,7 @@
 
   // The renderings to send along with `text`.
   function glossaryFor(text) {
-    if (!glossary.size || !unifyNamesOn()) return [];
+    if (!glossary.size || glossaryUnsupported) return [];
     if (glossaryTarget !== (settings?.targetLanguage || "")) return [];
     const hits = [];
     for (const entry of glossary) {
@@ -1238,43 +1230,6 @@
     }
     // Longest first, so a full name is listed before the given name inside it.
     return hits.sort((a, b) => b[0].length - a[0].length).slice(0, GLOSSARY_HINT_MAX);
-  }
-
-  // Stored as { [target language]: [[name, rendering], …] } — a rendering is
-  // only good for the language it is in.
-  async function readNameMemories() {
-    try {
-      const all = (await chrome.storage.local.get(NAME_MEMORY_KEY))?.[NAME_MEMORY_KEY];
-      if (all && typeof all === "object" && !Array.isArray(all)) return all;
-    } catch (_) {
-      // No storage (or the extension was reloaded under this page): the
-      // glossary still works for this video, it is just not remembered.
-    }
-    return {};
-  }
-
-  function memoryFor(all, target) {
-    const entries = Array.isArray(all[target]) ? all[target] : [];
-    return new Map(
-      entries.filter(
-        (e) => Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "string"
-      )
-    );
-  }
-
-  async function rememberNames(pairs, target) {
-    if (!pairs.length) return;
-    try {
-      // Read again rather than reuse an earlier copy: another tab may have
-      // added names in the meantime. What is stored first stays.
-      const all = await readNameMemories();
-      const memory = memoryFor(all, target);
-      for (const [name, rendering] of pairs) {
-        if (!memory.has(name)) memory.set(name, rendering);
-      }
-      all[target] = [...memory].slice(-NAME_MEMORY_MAX);
-      await chrome.storage.local.set({ [NAME_MEMORY_KEY]: all });
-    } catch (_) {}
   }
 
   function requestGlossary(lines, known) {
@@ -1334,13 +1289,9 @@
       const target = glossaryTarget;
       const lines = [...new Set(chunk.map((c) => c.text.replace(/\s+/g, " ").trim()))];
       const text = lines.join("\n");
-      const memory = memoryFor(await readNameMemories(), target);
-      // What is already settled and shows up in these lines: this video's
-      // names (so "지훈" agrees with "김지훈"), then names from earlier videos.
+      // What is already settled and shows up in these lines, so that a name
+      // found now agrees with it ("지훈" with "김지훈").
       const known = [...glossary].filter(([name]) => text.includes(name));
-      for (const entry of memory) {
-        if (!glossary.has(entry[0]) && text.includes(entry[0])) known.push(entry);
-      }
       const t0 = Date.now();
       let resp = await requestGlossary(lines, known);
       // A failure this quick is usually a 429 or a 503; one more try is cheap.
@@ -1370,13 +1321,10 @@
       }
       const added = [];
       for (const [name, rendering] of resp.entries || []) {
-        if (glossary.has(name)) continue;
-        // A rendering settled before — in an earlier episode — beats a new idea.
-        const fixed = memory.get(name) || rendering;
-        glossary.set(name, fixed);
-        added.push([name, fixed]);
+        if (glossary.has(name)) continue; // the first rendering stays
+        glossary.set(name, rendering);
+        added.push([name, rendering]);
       }
-      await rememberNames(added, target);
       info(
         `name glossary: ${added.length} new name(s) from ${chunk.length} lines ` +
           `in ${Date.now() - t0}ms (${glossary.size} in all)` +
@@ -1392,7 +1340,7 @@
   function scanForNames() {
     if (glossaryScan) return glossaryScan;
     // Subtitles can be captured before the settings have arrived.
-    if (!settings || !unifyNamesOn()) return null;
+    if (!settings || glossaryUnsupported) return null;
     const target = settings.targetLanguage || "";
     if (glossaryTarget !== target) {
       // Renderings in another language are no use: start over.
@@ -2198,7 +2146,6 @@
       nativeCues: nativeCueStats(),
       layout: layoutSnapshot(),
       names: {
-        enabled: settings?.unifyNames !== false,
         unsupported: glossaryUnsupported,
         scanning: !!glossaryScan,
         count: glossary.size,
