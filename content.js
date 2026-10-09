@@ -210,6 +210,7 @@
     withheld: 0, // …and the second ask did not: the line was not shown
     gaveUp: 0, // lines abandoned after MAX_ROUNDS
     errors: 0, // transport failures and timeouts
+    named: 0, // requests sent with fixed name renderings attached
     skipped: {}, // lines left to the native subtitle, by detected language
   };
   const REASON_TEXT = {
@@ -1173,6 +1174,248 @@
     }
   }
 
+  // -------------- name glossary --------------
+  // Each cue is translated in a request of its own, so left to itself the
+  // model spells the same name differently from one line to the next. The
+  // names are settled first (background.js: buildNameGlossary) and every line
+  // is then sent together with the renderings it has to use.
+  //   glossary    — this video: name as spelled in the subtitles → rendering
+  //   name memory — every rendering settled so far, kept in
+  //                 chrome.storage.local so the next episode spells the cast
+  //                 the same way. It is only OFFERED to the model, as "already
+  //                 fixed": a name enters `glossary` when the model finds it
+  //                 in this video's lines. A name from another title that is
+  //                 an ordinary word here is therefore not forced on anything.
+  const glossary = new Map();
+  let glossaryTarget = ""; // the language those renderings are in
+  let glossaryScan = null; // the scan in flight, if any
+  let glossaryScans = 0; // scans started for this video
+  let glossaryHoldUntil = 0; // pre-translation waits for names until then
+  let glossaryUnsupported = false; // the provider takes no prompt
+  const GLOSSARY_CHUNK_LINES = 500;
+  const GLOSSARY_CHUNK_CHARS = 20000;
+  // After the first scan, wait for this many new lines before asking again:
+  // players that deliver subtitles a few cues at a time would otherwise cost
+  // a glossary request per segment.
+  const GLOSSARY_MIN_NEW_LINES = 40;
+  const GLOSSARY_WAIT_MS = 15000;
+  const GLOSSARY_REPLY_TIMEOUT_MS = 32000; // just over the worker's own limit
+  const GLOSSARY_HINT_MAX = 16;
+  const NAME_MEMORY_KEY = "nameMemory";
+  const NAME_MEMORY_MAX = 1000;
+  // Lines this close to being shown are translated without waiting for names.
+  const IMMINENT_S = 20;
+
+  function unifyNamesOn() {
+    return settings?.unifyNames !== false && !glossaryUnsupported;
+  }
+
+  // In scripts written with spaces a name has to stand as a word of its own
+  // ("Rose" is not in "Rosemary"). Korean particles and Japanese suffixes
+  // attach directly to the name, so there a plain substring is the right test.
+  const UNSPACED_SCRIPT = /[\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]/;
+  const LETTER = /\p{L}/u;
+
+  function nameOccurs(name, text) {
+    if (UNSPACED_SCRIPT.test(name)) return text.includes(name);
+    for (let i = text.indexOf(name); i !== -1; i = text.indexOf(name, i + 1)) {
+      const before = text[i - 1];
+      const after = text[i + name.length];
+      if (!(before && LETTER.test(before)) && !(after && LETTER.test(after))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // The renderings to send along with `text`.
+  function glossaryFor(text) {
+    if (!glossary.size || !unifyNamesOn()) return [];
+    if (glossaryTarget !== (settings?.targetLanguage || "")) return [];
+    const hits = [];
+    for (const entry of glossary) {
+      if (nameOccurs(entry[0], text)) hits.push(entry);
+    }
+    // Longest first, so a full name is listed before the given name inside it.
+    return hits.sort((a, b) => b[0].length - a[0].length).slice(0, GLOSSARY_HINT_MAX);
+  }
+
+  // Stored as { [target language]: [[name, rendering], …] } — a rendering is
+  // only good for the language it is in.
+  async function readNameMemories() {
+    try {
+      const all = (await chrome.storage.local.get(NAME_MEMORY_KEY))?.[NAME_MEMORY_KEY];
+      if (all && typeof all === "object" && !Array.isArray(all)) return all;
+    } catch (_) {
+      // No storage (or the extension was reloaded under this page): the
+      // glossary still works for this video, it is just not remembered.
+    }
+    return {};
+  }
+
+  function memoryFor(all, target) {
+    const entries = Array.isArray(all[target]) ? all[target] : [];
+    return new Map(
+      entries.filter(
+        (e) => Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "string"
+      )
+    );
+  }
+
+  async function rememberNames(pairs, target) {
+    if (!pairs.length) return;
+    try {
+      // Read again rather than reuse an earlier copy: another tab may have
+      // added names in the meantime. What is stored first stays.
+      const all = await readNameMemories();
+      const memory = memoryFor(all, target);
+      for (const [name, rendering] of pairs) {
+        if (!memory.has(name)) memory.set(name, rendering);
+      }
+      all[target] = [...memory].slice(-NAME_MEMORY_MAX);
+      await chrome.storage.local.set({ [NAME_MEMORY_KEY]: all });
+    } catch (_) {}
+  }
+
+  function requestGlossary(lines, known) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(
+        () => resolve({ ok: false, error: "no reply" }),
+        GLOSSARY_REPLY_TIMEOUT_MS
+      );
+      const done = (r) => {
+        clearTimeout(timer);
+        resolve(r);
+      };
+      try {
+        chrome.runtime.sendMessage({ type: "buildGlossary", lines, known }, (resp) => {
+          const lastError = chrome.runtime.lastError;
+          done(
+            lastError
+              ? { ok: false, error: lastError.message }
+              : resp || { ok: false, error: "no reply" }
+          );
+        });
+      } catch (e) {
+        done({ ok: false, error: String(e?.message || e) });
+      }
+    });
+  }
+
+  const needsNameScan = (c) =>
+    !c.scanned && !!compareKey(c.text) && !shouldSkipTranslation(c.text);
+
+  // The next lot of lines to look through, nearest the playhead first: those
+  // are the lines about to be translated.
+  function nextNameChunk() {
+    const pending = cueList.filter(needsNameScan);
+    if (glossaryScans > 1 && pending.length < GLOSSARY_MIN_NEW_LINES) return [];
+    pending.sort(byPlayhead(cueClock()));
+    // Even lots rather than a full one followed by a handful.
+    const lots = Math.ceil(pending.length / GLOSSARY_CHUNK_LINES);
+    const size = Math.ceil(pending.length / (lots || 1));
+    const chunk = [];
+    let chars = 0;
+    for (const c of pending) {
+      if (chunk.length >= size || chars >= GLOSSARY_CHUNK_CHARS) break;
+      chunk.push(c);
+      chars += c.text.length;
+    }
+    return chunk;
+  }
+
+  async function runNameScan() {
+    let first = true;
+    for (;;) {
+      const chunk = nextNameChunk();
+      if (!chunk.length) return;
+      for (const c of chunk) c.scanned = true;
+      const video = lastVideoId;
+      const target = glossaryTarget;
+      const lines = [...new Set(chunk.map((c) => c.text.replace(/\s+/g, " ").trim()))];
+      const text = lines.join("\n");
+      const memory = memoryFor(await readNameMemories(), target);
+      // What is already settled and shows up in these lines: this video's
+      // names (so "지훈" agrees with "김지훈"), then names from earlier videos.
+      const known = [...glossary].filter(([name]) => text.includes(name));
+      for (const entry of memory) {
+        if (!glossary.has(entry[0]) && text.includes(entry[0])) known.push(entry);
+      }
+      const t0 = Date.now();
+      let resp = await requestGlossary(lines, known);
+      // A failure this quick is usually a 429 or a 503; one more try is cheap.
+      if (!resp.ok && Date.now() - t0 < 8000) resp = await requestGlossary(lines, known);
+      if (first) {
+        // The lines nearest the playhead have had their turn; the rest of the
+        // scan stays far ahead of the translator, which takes seconds a line.
+        first = false;
+        glossaryHoldUntil = 0;
+      }
+      // Answered for a video that is gone, or in a language no longer wanted.
+      if (lastVideoId !== video || glossaryTarget !== target) continue;
+      if (!resp.ok) {
+        warn(
+          `name glossary: could not settle the names in ${chunk.length} lines ` +
+            `(${resp.error}); they are translated without it`
+        );
+        continue;
+      }
+      if (resp.unsupported) {
+        glossaryUnsupported = true;
+        // Nothing was looked at: leave it all for a provider that can.
+        glossaryScans = 0;
+        for (const c of chunk) c.scanned = false;
+        info("name glossary: not available with this translation provider");
+        return;
+      }
+      const added = [];
+      for (const [name, rendering] of resp.entries || []) {
+        if (glossary.has(name)) continue;
+        // A rendering settled before — in an earlier episode — beats a new idea.
+        const fixed = memory.get(name) || rendering;
+        glossary.set(name, fixed);
+        added.push([name, fixed]);
+      }
+      await rememberNames(added, target);
+      info(
+        `name glossary: ${added.length} new name(s) from ${chunk.length} lines ` +
+          `in ${Date.now() - t0}ms (${glossary.size} in all)` +
+          (added.length
+            ? ": " + added.slice(0, 12).map(([n, r]) => `${n}→${r}`).join(", ")
+            : "")
+      );
+    }
+  }
+
+  // Start settling the names in captured lines not looked at yet. Returns the
+  // scan in flight (a promise), or null when there is nothing to do.
+  function scanForNames() {
+    if (glossaryScan) return glossaryScan;
+    // Subtitles can be captured before the settings have arrived.
+    if (!settings || !unifyNamesOn()) return null;
+    const target = settings.targetLanguage || "";
+    if (glossaryTarget !== target) {
+      // Renderings in another language are no use: start over.
+      glossary.clear();
+      glossaryTarget = target;
+      glossaryScans = 0;
+      for (const c of cueList) c.scanned = false;
+    }
+    glossaryScans++;
+    if (!nextNameChunk().length) {
+      glossaryScans--;
+      return null;
+    }
+    glossaryHoldUntil = Date.now() + GLOSSARY_WAIT_MS;
+    glossaryScan = runNameScan()
+      .catch((e) => warn("name glossary: scan failed:", String(e?.message || e)))
+      .finally(() => {
+        glossaryScan = null;
+        glossaryHoldUntil = 0;
+      });
+    return glossaryScan;
+  }
+
   // The one way a translation is obtained — for the line on screen (live) and
   // for the pre-translator alike. Returns "" when there is none to show; only
   // text the service worker accepted is ever cached or returned.
@@ -1190,6 +1433,8 @@
     // translate only the first line and echo the rest of the source text,
     // which our parser's byLine-fallback then accepted as "translations".
     const lines = [text];
+    const names = glossaryFor(text);
+    if (names.length) stats.named++;
     const t0 = Date.now();
     const promise = new Promise((resolve) => {
       // Context lines only make sense in playing order, i.e. for live lines.
@@ -1223,7 +1468,7 @@
         fail("timeout");
       }, TRANSLATE_TIMEOUT_MS);
       chrome.runtime.sendMessage(
-        { type: "translate", lines, history: historySlice, attempt },
+        { type: "translate", lines, history: historySlice, attempt, glossary: names },
         (resp) => {
           const dt = Date.now() - t0;
           const lastError = chrome.runtime.lastError;
@@ -1529,6 +1774,19 @@
     return added;
   }
 
+  // Where playback is, on the clock the cue times use.
+  function cueClock() {
+    const videos = getVideos();
+    const cur = videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
+    return (cur ? cur.currentTime : 0) - timelineOffset;
+  }
+
+  // Upcoming cues first, nearest first; cues already behind the playhead last.
+  function byPlayhead(now) {
+    const dist = (c) => (c.start >= now ? c.start - now : now - c.start + 1e6);
+    return (a, b) => dist(a) - dist(b);
+  }
+
   let batchSchedulerRunning = false;
   async function scheduleBatchTranslation() {
     if (batchSchedulerRunning) return;
@@ -1537,6 +1795,10 @@
       // Keep draining while new cues keep being captured.
       // eslint-disable-next-line no-constant-condition
       while (true) {
+        // Names first — see "name glossary". Until they are settled only the
+        // lines about to be shown go out, so nothing reaches the screen late
+        // and nothing else is translated with a name spelled ad hoc.
+        const scan = scanForNames();
         // Skip-list lines are left alone — and deliberately NOT marked as
         // translated. Which language a kanji-only line is in can change once
         // more lines have been seen, and a line written off here as "Chinese,
@@ -1548,17 +1810,20 @@
           return !!key && mayTranslateNow(key) && !shouldSkipTranslation(c.text);
         });
         if (!pool.length) break;
-        const videos = getVideos();
-        const cur =
-          videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
         // Same clock the timeline display uses, so "nearest upcoming cue"
         // really is the one about to be shown.
-        const now = (cur ? cur.currentTime : 0) - timelineOffset;
-        pool.sort((a, b) => {
-          const da = a.start >= now ? a.start - now : now - a.start + 1e6;
-          const db = b.start >= now ? b.start - now : now - b.start + 1e6;
-          return da - db;
-        });
+        const now = cueClock();
+        pool.sort(byPlayhead(now));
+        const holding = !!scan && Date.now() < glossaryHoldUntil;
+        const waitForNames = () =>
+          Promise.race([scan, new Promise((r) => setTimeout(r, 500))]);
+        const batch = holding
+          ? pool.filter((c) => c.end >= now && c.start - now <= IMMINENT_S)
+          : pool;
+        if (!batch.length) {
+          await waitForNames();
+          continue;
+        }
         // Each request measures 2–5s against this provider, so 3 workers only
         // just keep ahead of playback and any stall puts the playhead in front
         // of the translated window.
@@ -1571,8 +1836,8 @@
         for (let w = 0; w < MAX_CONCURRENT; w++) {
           workers.push(
             (async () => {
-              while (idx < pool.length) {
-                const c = pool[idx++];
+              while (idx < batch.length) {
+                const c = batch[idx++];
                 const key = compareKey(c.text);
                 const before = failures.get(key)?.attempts || 0;
                 c.translating = true;
@@ -1596,12 +1861,16 @@
         }
         await Promise.all(workers);
         info(
-          `pre-translated ${filled}/${pool.length} cues in ${Date.now() - t0}ms` +
+          `pre-translated ${filled}/${batch.length} cues in ${Date.now() - t0}ms` +
             (charged ? ` (${charged} refused, will retry later)` : "")
         );
         // Nothing moved at all: whatever is left is waiting on something else.
-        // Stop rather than spin; the retry timers bring us back.
-        if (!filled && !charged) break;
+        // Stop rather than spin; the retry timers bring us back. (While names
+        // are being settled the rest of the pool is still to come.)
+        if (!filled && !charged) {
+          if (!holding) break;
+          await waitForNames();
+        }
       }
     } finally {
       batchSchedulerRunning = false;
@@ -1879,6 +2148,7 @@
 
   async function applySettings() {
     await loadSettings();
+    glossaryUnsupported = false; // the provider may have changed; ask again
     const active = !!settings?.enabled && isPlayerPage();
     hideNativeSubtitles(active);
     if (active) startObserving();
@@ -1927,6 +2197,13 @@
       currentTranslated: (currentTranslated || "").slice(0, 60),
       nativeCues: nativeCueStats(),
       layout: layoutSnapshot(),
+      names: {
+        enabled: settings?.unifyNames !== false,
+        unsupported: glossaryUnsupported,
+        scanning: !!glossaryScan,
+        count: glossary.size,
+        sample: [...glossary].slice(0, 30),
+      },
       showingNative: !!(currentOriginal && currentSkip),
       stats,
       withheldLines: [...failures.values()].filter((f) => f.attempts >= MAX_ROUNDS).length,
@@ -1998,6 +2275,9 @@
       recentCjkLines.length = 0;
       cueLangByKey.clear();
       failures.clear();
+      glossary.clear();
+      glossaryScans = 0;
+      glossaryHoldUntil = 0;
       currentSkip = false;
       clearTimeout(batchWakeTimer);
       batchWakeTimer = null;

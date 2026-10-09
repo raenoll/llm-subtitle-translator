@@ -67,6 +67,7 @@ async function load() {
   $("temperature").value = s.temperature ?? 0.2;
   $("targetLanguage").value = s.targetLanguage || "简体中文";
   $("contextLines").value = s.contextLines ?? 0;
+  $("unifyNames").checked = s.unifyNames !== false;
   $("showOriginal").checked = !!s.showOriginal;
   $("enabled").checked = !!s.enabled;
   $("debug").checked = !!s.debug;
@@ -180,6 +181,31 @@ async function refreshNativeFont() {
 
 $("nativeFontRefresh").addEventListener("click", refreshNativeFont);
 
+// --- Remembered name renderings -------------------------------------------
+// content.js keeps them in chrome.storage.local under this key; see "name
+// glossary" there. Only the count is shown here — the names in use for the
+// video being played are listed in the diagnostics panel.
+const NAME_MEMORY_KEY = "nameMemory";
+
+async function refreshNameMemory() {
+  // { [target language]: [[name, rendering], …] }
+  const all = (await chrome.storage.local.get(NAME_MEMORY_KEY))[NAME_MEMORY_KEY] || {};
+  const parts = Object.entries(all)
+    .filter(([, entries]) => Array.isArray(entries) && entries.length)
+    .map(([target, entries]) => `${target} ${entries.length} 个`);
+  $("nameMemoryCount").textContent = parts.length ? parts.join("、") : "还没有";
+  $("nameMemoryClear").disabled = !parts.length;
+}
+
+$("nameMemoryClear").addEventListener("click", async () => {
+  await chrome.storage.local.remove(NAME_MEMORY_KEY);
+  toast("已清空");
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes[NAME_MEMORY_KEY]) refreshNameMemory();
+});
+refreshNameMemory();
+
 // --- Log / diagnostics panel ---------------------------------------------
 // Reads the content script's in-memory log and timing stats, so the state of
 // a playing tab is inspectable from here rather than from DevTools.
@@ -267,6 +293,31 @@ function summarize(d) {
         (nc.inShadow ? `，${nc.inShadow} 个在 shadow root 里` : "") +
         `）`
     );
+  }
+  // Which names have a fixed rendering in the video being played.
+  const nm = d.names;
+  if (nm) {
+    if (!nm.enabled) {
+      lines.push("译名：「统一人名译法」已关闭，每句各译各的，同一个名字可能出现不同译法。");
+    } else if (nm.unsupported) {
+      lines.push("译名：当前翻译服务不接受提示词，无法统一人名译法。");
+    } else if (!d.capturedCues) {
+      lines.push("译名：没有抓到字幕文件，无法提前整理人名，同一个名字可能出现不同译法。");
+    } else if (!nm.count) {
+      lines.push(
+        nm.scanning
+          ? "译名：正在从字幕里整理人名……"
+          : "译名：还没有定下任何译名（字幕里没找到人名，或整理的请求失败了——失败会记在下面的日志里）。"
+      );
+    } else {
+      lines.push(
+        `译名：本片已定下 ${nm.count} 个` +
+          (nm.scanning ? "（还在整理）" : "") +
+          `，${st.named || 0} 句翻译时带上了对应译名 —— ` +
+          nm.sample.map(([n, r]) => `${n}→${r}`).join("、") +
+          (nm.count > nm.sample.length ? " …" : "")
+      );
+    }
   }
   // Where the translation sits relative to what can be seen. Boxes are
   // [left, top, width, height]. A box that pokes out goes FIRST, as above.
@@ -585,6 +636,7 @@ bindText("customEndpoint", "customEndpoint");
 bindText("temperature", "temperature", (v) => Number(v));
 bindText("targetLanguage", "targetLanguage");
 bindText("contextLines", "contextLines", (v) => Number(v));
+bindCheckbox("unifyNames", "unifyNames");
 bindCheckbox("showOriginal", "showOriginal");
 bindCheckbox("enabled", "enabled");
 bindCheckbox("debug", "debug");

@@ -32,6 +32,9 @@ const DEFAULT_SETTINGS = {
   temperature: 0.2,
   batchSize: 3,
   contextLines: 0,
+  // Agree on one rendering per proper name before translating, and hand it to
+  // the model with every line that contains the name. See buildNameGlossary.
+  unifyNames: true,
   debug: false,
   fontFamily: "",
   // 400 (Regular). The old hardcoded 700 resolved to Semibold 600 — PingFang
@@ -56,17 +59,17 @@ const DEFAULT_SETTINGS = {
 // that line then silently never translates again, not even on replay.
 const REQUEST_TIMEOUT_MS = 20000;
 
-async function fetchWithTimeout(url, options = {}) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   try {
     // globalThis.fetch, never this wrapper — a blanket rewrite of the call
     // sites once turned this line into infinite recursion.
     return await globalThis.fetch(url, {
       ...options,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     if (err?.name === "TimeoutError" || err?.name === "AbortError") {
-      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无响应）`);
+      throw new Error(`请求超时（${timeoutMs / 1000}s 无响应）`);
     }
     throw err;
   }
@@ -401,7 +404,7 @@ function buildContextBlock(history, targetLanguage) {
   return `Recent translated lines (for tone and continuity, do NOT re-translate these):\n${lines}\n\nNow translate the following into ${targetLanguage}:\n`;
 }
 
-async function callGemini({ apiKey, model, system, user, temperature }) {
+async function callGemini({ apiKey, model, system, user, temperature, timeoutMs }) {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
   )}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -413,11 +416,15 @@ async function callGemini({ apiKey, model, system, user, temperature }) {
       responseMimeType: "text/plain",
     },
   };
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const res = await fetchWithTimeout(
+    endpoint,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    timeoutMs
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Gemini ${res.status}: ${text.slice(0, 300)}`);
@@ -447,6 +454,7 @@ async function callOpenAICompatible({
   user,
   temperature,
   endpointOverride,
+  timeoutMs,
 }) {
   const endpoint =
     endpointOverride || "https://api.openai.com/v1/chat/completions";
@@ -458,14 +466,18 @@ async function callOpenAICompatible({
       { role: "user", content: user },
     ],
   };
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const res = await fetchWithTimeout(
+    endpoint,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    timeoutMs
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`OpenAI ${res.status}: ${text.slice(0, 300)}`);
@@ -646,23 +658,35 @@ async function callGoogleTranslateV3({
   return arr.map((t) => (t.translatedText || "").trim());
 }
 
-async function callAnthropic({ apiKey, model, system, user, temperature }) {
-  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
+async function callAnthropic({
+  apiKey,
+  model,
+  system,
+  user,
+  temperature,
+  timeoutMs,
+  maxTokens = 1024,
+}) {
+  const res = await fetchWithTimeout(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        temperature,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      temperature,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
-  });
+    timeoutMs
+  );
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
@@ -676,7 +700,176 @@ async function callAnthropic({ apiKey, model, system, user, temperature }) {
     .trim();
 }
 
-async function translate({ lines, history, attempt }) {
+// The Google Translate providers take no prompt, so nothing that depends on
+// instructing a model applies to them.
+const isLLMProvider = (provider) =>
+  provider !== "google-translate" && provider !== "google-translate-v3";
+
+function llmModel(settings) {
+  return (
+    settings.models?.[settings.provider] ||
+    settings.model ||
+    PROVIDER_DEFAULT_MODEL[settings.provider]
+  );
+}
+
+// One prompt to whichever LLM is configured; returns its text.
+async function callLLM(settings, request) {
+  switch (settings.provider) {
+    case "gemini":
+      return callGemini(request);
+    case "openai":
+      return callOpenAICompatible(request);
+    case "anthropic":
+      return callAnthropic(request);
+    case "custom":
+      if (!settings.customEndpoint) {
+        throw new Error("自定义 provider 需要填写 endpoint URL。");
+      }
+      return callOpenAICompatible({
+        ...request,
+        endpointOverride: settings.customEndpoint,
+      });
+    default:
+      throw new Error(`未知 provider: ${settings.provider}`);
+  }
+}
+
+// --- Name glossary ---------------------------------------------------------
+// Every cue is translated in a request of its own, so the model decides afresh
+// each time how to write a name — and a Korean or Japanese name has several
+// equally plausible spellings in Chinese. The same character came out as 志勋
+// in one line and 智勋 in the next. So the names are settled once, up front:
+// the content script sends the subtitle text here, the model lists the proper
+// names with one rendering each, and from then on every line that contains a
+// name is sent together with the rendering it must use.
+
+// An extension service worker is killed when a fetch takes longer than 30s to
+// answer, so this cannot be raised past that.
+const GLOSSARY_TIMEOUT_MS = 28000;
+const GLOSSARY_MAX_ENTRIES = 200;
+const GLOSSARY_NAME_MAX = 40; // characters, for a name and for its rendering
+const GLOSSARY_HINT_MAX = 16; // names handed over with one translation request
+
+function buildGlossarySystemPrompt(targetLanguage) {
+  const label = languageLabel(targetLanguage);
+  return (
+    `You prepare the name glossary for a ${label} subtitle translation. The ` +
+    `user message holds lines of dialogue from one film or episode. List the ` +
+    `proper names that occur in them: people (full names, given names, family ` +
+    `names, nicknames), places, organisations and invented names. For each, ` +
+    `give ONE rendering in ${label} — the one to use every time that name ` +
+    `comes up: the established rendering when the name has one (real people ` +
+    `and places, well-known characters), otherwise a natural transliteration. ` +
+    `Names that belong together must agree: a given name is written the same ` +
+    `way on its own as inside the full name. Write each name exactly as it is ` +
+    `spelled in the lines, in its bare form, without particles, honorifics, ` +
+    `titles or possessive endings (지훈 rather than 지훈아 or 지훈 씨, 田中 ` +
+    `rather than 田中さん, Tom rather than Tom's). Do not list ordinary words, ` +
+    `pronouns, kinship terms or job titles. Some renderings may be given as already ` +
+    `fixed: if one of those names occurs as a name in these lines, list it ` +
+    `again with exactly that rendering, and leave it out if it does not. ` +
+    `Output one entry per line in the form: name = rendering. No numbering, ` +
+    `no notes, nothing else. If there are no names, output the single word NONE.`
+  );
+}
+
+// [name, rendering] pairs made safe to put into a prompt: this list arrives in
+// a message from a content script, which shares a process with the web page.
+function cleanGlossaryPairs(pairs, max) {
+  const out = [];
+  const seen = new Set();
+  for (const pair of Array.isArray(pairs) ? pairs : []) {
+    if (!Array.isArray(pair)) continue;
+    const name = String(pair[0] ?? "").replace(/\s+/g, " ").trim();
+    const rendering = String(pair[1] ?? "").replace(/\s+/g, " ").trim();
+    if (!name || !rendering || seen.has(name)) continue;
+    if ([...name].length > GLOSSARY_NAME_MAX) continue;
+    if ([...rendering].length > GLOSSARY_NAME_MAX) continue;
+    seen.add(name);
+    out.push([name, rendering]);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// What the model listed, reduced to entries that can be trusted: the name has
+// to be in the subtitle text as written (a name the model made up, or tidied
+// the spelling of, would never match a line), and the rendering has to be in
+// the target language.
+function parseGlossaryReply(reply, text, target) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of String(reply || "").split("\n")) {
+    // Tolerate a bullet or a number in front, and the arrows models like.
+    const line = raw.replace(/^\s*(?:[-*•·]+|\d+[.)、])\s*/, "").trim();
+    const m = line.match(/^(.+?)\s*(?:=>|->|→|=|\t)\s*(.+)$/);
+    if (!m) continue;
+    const unquote = (v) => v.trim().replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, "").trim();
+    const name = unquote(m[1]);
+    // "志勋（男主角）" — keep the rendering, drop the remark.
+    const rendering = unquote(m[2].replace(/\s*[（(][^（()）]*[)）]\s*$/, ""));
+    const len = [...name].length;
+    if (len < 2 || len > GLOSSARY_NAME_MAX) continue;
+    if (!rendering || [...rendering].length > GLOSSARY_NAME_MAX) continue;
+    if (name === rendering || seen.has(name)) continue;
+    if (!hasLetters(name) || !text.includes(name)) continue;
+    if (replyInTargetLanguage(rendering, target, name) === false) continue;
+    seen.add(name);
+    out.push([name, rendering]);
+    if (out.length >= GLOSSARY_MAX_ENTRIES) break;
+  }
+  return out;
+}
+
+async function buildNameGlossary({ lines, known }) {
+  const settings = await getSettings();
+  if (!isLLMProvider(settings.provider)) return { entries: [], unsupported: true };
+  const apiKey =
+    settings.apiKeys?.[settings.provider] || settings.apiKey || "";
+  if (!apiKey) {
+    throw new Error(
+      `${settings.provider} 的 API key 未设置，请先在扩展选项里填写。`
+    );
+  }
+  const text = (Array.isArray(lines) ? lines : [])
+    .map((l) => String(l ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!text) return { entries: [] };
+  const fixed = cleanGlossaryPairs(known, GLOSSARY_MAX_ENTRIES);
+  const user =
+    (fixed.length
+      ? `Already fixed:\n${fixed.map(([n, r]) => `${n} = ${r}`).join("\n")}\n\n`
+      : "") + `Lines:\n${text}`;
+  const reply = await callLLM(settings, {
+    apiKey,
+    model: llmModel(settings),
+    system: buildGlossarySystemPrompt(settings.targetLanguage),
+    user,
+    // The same text should give the same list.
+    temperature: 0,
+    timeoutMs: GLOSSARY_TIMEOUT_MS,
+    maxTokens: 4096,
+  });
+  return {
+    entries: parseGlossaryReply(unescapeLiterals(reply), text, settings.targetLanguage),
+  };
+}
+
+// The renderings a line must use, as the opening of its translation request.
+function buildGlossaryBlock(glossary) {
+  const pairs = cleanGlossaryPairs(glossary, GLOSSARY_HINT_MAX);
+  if (!pairs.length) return "";
+  return (
+    "Names in this title have fixed renderings. Where one of the following " +
+    "occurs as a name in the text below, write it exactly as given:\n" +
+    pairs.map(([n, r]) => `${n} = ${r}`).join("\n") +
+    "\n\n"
+  );
+}
+
+async function translate({ lines, history, attempt, glossary }) {
   const settings = await getSettings();
   const apiKey =
     settings.apiKeys?.[settings.provider] || settings.apiKey || "";
@@ -714,16 +907,14 @@ async function translate({ lines, history, attempt }) {
     return judgePlain(lines, translations, settings.targetLanguage);
   }
 
-  const model =
-    settings.models?.[settings.provider] ||
-    settings.model ||
-    PROVIDER_DEFAULT_MODEL[settings.provider];
+  const model = llmModel(settings);
   const label = languageLabel(settings.targetLanguage);
   const contextBlock = buildContextBlock(history, label);
   // Name the target in the user turn too: some models weigh the system
   // instruction lightly, and a bare line of Japanese as the entire user
   // message was often answered in English.
-  const lead = contextBlock || `Translate into ${label}:\n`;
+  const lead =
+    buildGlossaryBlock(glossary) + (contextBlock || `Translate into ${label}:\n`);
   const user = lead + lines.join("\n---\n");
 
   // Which round of attempts this is for the line (0 = first). Later rounds are
@@ -736,37 +927,13 @@ async function translate({ lines, history, attempt }) {
   );
 
   const request = async (strict) => {
-    const common = {
+    const output = await callLLM(settings, {
       apiKey,
       model,
       system: buildSystemPrompt(settings.targetLanguage, strict),
       user,
       temperature,
-    };
-
-    let output;
-    switch (settings.provider) {
-      case "gemini":
-        output = await callGemini(common);
-        break;
-      case "openai":
-        output = await callOpenAICompatible(common);
-        break;
-      case "anthropic":
-        output = await callAnthropic(common);
-        break;
-      case "custom":
-        if (!settings.customEndpoint) {
-          throw new Error("自定义 provider 需要填写 endpoint URL。");
-        }
-        output = await callOpenAICompatible({
-          ...common,
-          endpointOverride: settings.customEndpoint,
-        });
-        break;
-      default:
-        throw new Error(`未知 provider: ${settings.provider}`);
-    }
+    });
 
     // Unescape first: a model that wrote the separator as escape notation
     // would otherwise fail the split and send every cue back for a retry.
@@ -856,12 +1023,23 @@ async function translate({ lines, history, attempt }) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "translate") {
-    translate({ lines: msg.lines, history: msg.history, attempt: msg.attempt })
+    translate({
+      lines: msg.lines,
+      history: msg.history,
+      attempt: msg.attempt,
+      glossary: msg.glossary,
+    })
       .then((r) =>
         sendResponse(
           Array.isArray(r) ? { ok: true, translations: r } : { ok: true, ...r }
         )
       )
+      .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
+    return true; // async
+  }
+  if (msg?.type === "buildGlossary") {
+    buildNameGlossary({ lines: msg.lines, known: msg.known })
+      .then((r) => sendResponse({ ok: true, ...r }))
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true; // async
   }
