@@ -21,7 +21,8 @@ async function load() {
   }
   langSel.value = s.targetLanguage || "简体中文";
 
-  if (!s.apiKey) {
+  // Keys are stored per provider; `apiKey` is the deprecated single field.
+  if (!s.apiKeys?.[s.provider] && !s.apiKey) {
     setStatus("未配置 API key，点击下方打开设置。", false);
   } else {
     setStatus(`已启用 · ${s.provider}`);

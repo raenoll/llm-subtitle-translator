@@ -148,6 +148,61 @@ async function dropRemovedProviders() {
 // device still running an older version can put the removed settings back.
 const removedProvidersDropped = dropRemovedProviders().catch(() => {});
 
+// --- Keeping the API keys out of web pages --------------------------------
+// The content script runs inside the streaming sites' own processes. It needs
+// the display settings; it never needs a key, since every provider call is
+// made here. Three doors are shut so that a key cannot be fetched from there:
+//   1. chrome.storage.sync itself — content scripts can read it by default
+//   2. the getSettings reply, which used to carry the whole settings object
+//   3. setSettings — pointing the custom endpoint somewhere else would have
+//      the next translation request deliver that endpoint's key to it
+// The extension's own pages (settings, popup) keep full access.
+
+// Settings a content script is never sent: the credentials, and the custom
+// endpoint, whose URL can carry one. Every credential belongs in `apiKeys`.
+const PRIVATE_SETTINGS = ["apiKeys", "apiKey", "customEndpoint"];
+
+async function lockSyncedSettings() {
+  try {
+    await chrome.storage.sync.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+  } catch (_) {
+    // Not offered by this browser. Doors 2 and 3 are shut regardless.
+  }
+}
+// On every start: whether the browser remembers the level is not documented.
+lockSyncedSettings();
+
+// Whether a message came from one of the extension's own pages. `origin` and
+// `url` are filled in by the browser, not by whoever sent the message.
+function fromOwnPage(sender) {
+  try {
+    // Plain string comparison: what URL().origin gives for a
+    // chrome-extension: address differs between engines.
+    const base = chrome.runtime.getURL(""); // "chrome-extension://<id>/"
+    return (
+      sender?.origin === base.replace(/\/$/, "") ||
+      (typeof sender?.url === "string" && sender.url.startsWith(base))
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+// With synced storage closed to them, content scripts may not be told when a
+// setting changes either, so tell every page they run on.
+async function tellPagesSettingsChanged() {
+  try {
+    const url = chrome.runtime.getManifest().content_scripts.flatMap((c) => c.matches);
+    for (const tab of await chrome.tabs.query({ url })) {
+      // No content script in that tab (yet) is not an error.
+      chrome.tabs.sendMessage(tab.id, { type: "settingsChanged" }).catch(() => {});
+    }
+  } catch (_) {}
+}
+chrome.storage.onChanged.addListener((_changes, area) => {
+  if (area === "sync") tellPagesSettingsChanged();
+});
+
 async function getSettings() {
   const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
   const settings = { ...DEFAULT_SETTINGS, ...stored };
@@ -897,7 +952,7 @@ async function translate({ lines, history, attempt, glossary }) {
   return { translations, first, rejected, raw, asks, detail: emptyDetail };
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "translate") {
     translate({
       lines: msg.lines,
@@ -923,12 +978,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // Ship the fallback table along with the settings so the options page can
     // name the concrete model instead of saying a vague "default" — and so it
     // never has to keep its own copy that could drift from this one.
-    getSettings().then((s) =>
-      sendResponse({ ...s, defaultModels: { ...PROVIDER_DEFAULT_MODEL } })
-    );
+    getSettings().then((s) => {
+      const reply = { ...s, defaultModels: { ...PROVIDER_DEFAULT_MODEL } };
+      if (!fromOwnPage(sender)) {
+        for (const key of PRIVATE_SETTINGS) delete reply[key];
+      }
+      sendResponse(reply);
+    });
     return true;
   }
   if (msg?.type === "setSettings") {
+    if (!fromOwnPage(sender)) {
+      sendResponse({ ok: false, error: "settings can only be changed from the extension's own pages" });
+      return false;
+    }
     chrome.storage.sync.set(msg.patch || {}).then(() => sendResponse({ ok: true }));
     return true;
   }

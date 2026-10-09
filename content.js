@@ -2213,9 +2213,21 @@
     return false;
   });
 
+  // A setting changed. The service worker says so in a message, because
+  // synced storage is closed to content scripts (it holds the API keys) and a
+  // closed area may not deliver its change events here. The storage event is
+  // still listened for in case it does arrive; the two are folded into one.
+  let settingsChangeTimer = null;
+  function settingsChanged() {
+    clearTimeout(settingsChangeTimer);
+    settingsChangeTimer = setTimeout(applySettings, 50);
+  }
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === "settingsChanged") settingsChanged();
+    return false;
+  });
   chrome.storage.onChanged?.addListener((changes, area) => {
-    if (area !== "sync") return;
-    applySettings();
+    if (area === "sync") settingsChanged();
   });
 
   // The options page asks what the player is rendering right now, so it can
