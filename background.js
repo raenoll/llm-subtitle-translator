@@ -8,7 +8,6 @@ const DEFAULT_SETTINGS = {
     openai: "",
     anthropic: "",
     "google-translate": "",
-    "google-translate-v3": "",
     custom: "",
   },
   model: "", // DEPRECATED
@@ -17,11 +16,12 @@ const DEFAULT_SETTINGS = {
     openai: "",
     anthropic: "",
     "google-translate": "",
-    "google-translate-v3": "",
     custom: "",
   },
-  googleProjectId: "",
-  googleLocation: "us-central1",
+  // Set when a provider the user had selected was removed and they were moved
+  // to the default one; the settings page shows it once. See
+  // dropRemovedProviders.
+  removedProviderNotice: "",
   // Languages that should NOT be translated — if a cue's detected language
   // falls into this list, the extension shows the original text as-is.
   skipLanguages: ["简体中文", "繁體中文"],
@@ -84,7 +84,6 @@ const PROVIDER_DEFAULT_MODEL = {
   anthropic: "claude-haiku-4-5-20251001",
   custom: "",
   "google-translate": "", // no model selection; Cloud Translation v2
-  "google-translate-v3": "general/translation-llm", // Gemini-backed NMT+
 };
 
 // Map from the user-facing display language to Google Translate ISO codes.
@@ -111,9 +110,52 @@ function googleLangCode(target) {
   return "en";
 }
 
+// --- Providers that no longer exist ----------------------------------------
+// Google Translate v3 was removed in 1.17.0: it needed a service-account
+// private key and its own signing code, and what it offered — a Gemini-backed
+// translation model — is available with every feature by choosing Gemini.
+// Whoever had it selected is moved to the default provider and told so once on
+// the settings page, and what it stored is deleted rather than left behind in
+// synced storage.
+const REMOVED_PROVIDERS = ["google-translate-v3"];
+const REMOVED_SETTING_KEYS = ["googleProjectId", "googleLocation"];
+
+async function dropRemovedProviders() {
+  const stored = await chrome.storage.sync.get([
+    "provider",
+    "apiKeys",
+    "models",
+    ...REMOVED_SETTING_KEYS,
+  ]);
+  const patch = {};
+  if (REMOVED_PROVIDERS.includes(stored.provider)) {
+    patch.provider = DEFAULT_SETTINGS.provider;
+    patch.removedProviderNotice = stored.provider;
+  }
+  for (const map of ["apiKeys", "models"]) {
+    const slots = stored[map];
+    if (slots && REMOVED_PROVIDERS.some((name) => name in slots)) {
+      patch[map] = { ...slots };
+      for (const name of REMOVED_PROVIDERS) delete patch[map][name];
+    }
+  }
+  if (Object.keys(patch).length) await chrome.storage.sync.set(patch);
+  const stale = REMOVED_SETTING_KEYS.filter((key) => key in stored);
+  if (stale.length) await chrome.storage.sync.remove(stale);
+}
+
+// Every time the worker starts, not only on install: with Chrome sync on, a
+// device still running an older version can put the removed settings back.
+const removedProvidersDropped = dropRemovedProviders().catch(() => {});
+
 async function getSettings() {
   const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-  return { ...DEFAULT_SETTINGS, ...stored };
+  const settings = { ...DEFAULT_SETTINGS, ...stored };
+  // Covers a request that arrives before the clean-up above has finished.
+  if (REMOVED_PROVIDERS.includes(settings.provider)) {
+    settings.provider = DEFAULT_SETTINGS.provider;
+  }
+  return settings;
 }
 
 // The target as models read it best: an English name plus the native one.
@@ -509,155 +551,6 @@ async function callGoogleTranslate({ apiKey, targetCode, lines }) {
   return arr.map((t) => (t.translatedText || "").trim());
 }
 
-// --- Google Cloud OAuth2 JWT grant (for Translate v3) ---
-// The service worker keeps the most recent access token in memory and reuses
-// it until ~60s before expiry. Tokens last 1h; re-signing is cheap anyway.
-let v3TokenCache = null; // { accessToken, expiresAt, saFingerprint }
-
-function b64urlEncode(bytesOrString) {
-  const s =
-    typeof bytesOrString === "string"
-      ? btoa(unescape(encodeURIComponent(bytesOrString)))
-      : btoa(String.fromCharCode(...bytesOrString));
-  return s.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-}
-
-function pemToPkcs8(pem) {
-  const body = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
-    .replace(/-----END PRIVATE KEY-----/g, "")
-    .replace(/\s+/g, "");
-  const raw = atob(body);
-  const buf = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-  return buf.buffer;
-}
-
-async function getV3AccessToken(serviceAccountJson) {
-  let sa;
-  try {
-    sa = JSON.parse(serviceAccountJson);
-  } catch (e) {
-    throw new Error(
-      "Service Account JSON 解析失败，请粘贴完整的 .json 文件内容。"
-    );
-  }
-  if (!sa.client_email || !sa.private_key) {
-    throw new Error(
-      "Service Account JSON 缺字段（需要 client_email / private_key）。"
-    );
-  }
-  const now = Math.floor(Date.now() / 1000);
-  const fingerprint = `${sa.client_email}:${sa.private_key_id || ""}`;
-  if (
-    v3TokenCache &&
-    v3TokenCache.saFingerprint === fingerprint &&
-    v3TokenCache.expiresAt - 60 > now
-  ) {
-    return { accessToken: v3TokenCache.accessToken, projectId: sa.project_id };
-  }
-
-  const header = { alg: "RS256", typ: "JWT" };
-  const claim = {
-    iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/cloud-translation",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now,
-  };
-  const signingInput = `${b64urlEncode(JSON.stringify(header))}.${b64urlEncode(
-    JSON.stringify(claim)
-  )}`;
-
-  const keyBuf = pemToPkcs8(sa.private_key);
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    keyBuf,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sigBuf = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(signingInput)
-  );
-  const jwt = `${signingInput}.${b64urlEncode(new Uint8Array(sigBuf))}`;
-
-  const tokRes = await fetchWithTimeout("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body:
-      `grant_type=${encodeURIComponent(
-        "urn:ietf:params:oauth:grant-type:jwt-bearer"
-      )}&assertion=${encodeURIComponent(jwt)}`,
-  });
-  if (!tokRes.ok) {
-    const text = await tokRes.text();
-    throw new Error(
-      `OAuth2 token exchange ${tokRes.status}: ${text.slice(0, 300)}`
-    );
-  }
-  const tok = await tokRes.json();
-  v3TokenCache = {
-    accessToken: tok.access_token,
-    expiresAt: now + (tok.expires_in || 3600),
-    saFingerprint: fingerprint,
-  };
-  return { accessToken: tok.access_token, projectId: sa.project_id };
-}
-
-async function callGoogleTranslateV3({
-  serviceAccountJson,
-  projectIdOverride,
-  location,
-  model,
-  targetCode,
-  lines,
-}) {
-  const { accessToken, projectId: saProject } = await getV3AccessToken(
-    serviceAccountJson
-  );
-  const projectId = projectIdOverride || saProject;
-  if (!projectId) {
-    throw new Error(
-      "Project ID 未知（Service Account JSON 里没有 project_id，也未手动填写）。"
-    );
-  }
-  const loc = location || "us-central1";
-  const endpoint = `https://translation.googleapis.com/v3/projects/${encodeURIComponent(
-    projectId
-  )}/locations/${encodeURIComponent(loc)}:translateText`;
-  const body = {
-    contents: lines,
-    targetLanguageCode: targetCode,
-    mimeType: "text/plain",
-  };
-  const m = (model || "").trim();
-  if (m) {
-    body.model = m.startsWith("projects/")
-      ? m
-      : `projects/${projectId}/locations/${loc}/models/${m}`;
-  }
-  const res = await fetchWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(
-      `Google Translate v3 ${res.status}: ${text.slice(0, 300)}`
-    );
-  }
-  const data = await res.json();
-  const arr = data?.translations || [];
-  return arr.map((t) => (t.translatedText || "").trim());
-}
-
 async function callAnthropic({
   apiKey,
   model,
@@ -700,10 +593,9 @@ async function callAnthropic({
     .trim();
 }
 
-// The Google Translate providers take no prompt, so nothing that depends on
-// instructing a model applies to them.
-const isLLMProvider = (provider) =>
-  provider !== "google-translate" && provider !== "google-translate-v3";
+// Google Translate takes no prompt, so nothing that depends on instructing a
+// model applies to it.
+const isLLMProvider = (provider) => provider !== "google-translate";
 
 function llmModel(settings) {
   return (
@@ -890,22 +782,6 @@ async function translate({ lines, history, attempt, glossary }) {
     });
     return judgePlain(lines, translations, settings.targetLanguage);
   }
-  if (settings.provider === "google-translate-v3") {
-    const targetCode = googleLangCode(settings.targetLanguage);
-    const model =
-      settings.models?.["google-translate-v3"] ||
-      PROVIDER_DEFAULT_MODEL["google-translate-v3"];
-    const translations = await callGoogleTranslateV3({
-      // For v3 we store the Service Account JSON in the per-provider apiKey slot.
-      serviceAccountJson: apiKey,
-      projectIdOverride: settings.googleProjectId || "",
-      location: settings.googleLocation || "us-central1",
-      model,
-      targetCode,
-      lines,
-    });
-    return judgePlain(lines, translations, settings.targetLanguage);
-  }
 
   const model = llmModel(settings);
   const label = languageLabel(settings.targetLanguage);
@@ -1063,6 +939,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
+  // Let the clean-up finish first, or the write below puts back what it took out.
+  await removedProvidersDropped;
   const current = await chrome.storage.sync.get(null);
   const merged = { ...DEFAULT_SETTINGS, ...current };
   // Ensure the per-provider objects exist and include every known provider

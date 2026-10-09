@@ -12,6 +12,11 @@
         用大语言模型把 Netflix / Disney+ / Prime Video / YouTube 等平台的字幕实时翻译成你看得懂的语言。
       </p>
 
+      <section class="card notice" id="providerNotice" hidden>
+        <p><strong>Google Translate v3 已在 1.17.0 移除。</strong>你之前选的是它，现在已自动改用 Gemini，保存过的 Service Account JSON 也已从扩展里删除。请在下面确认 Gemini 的 API Key 已填好并点「测试连接」，也可以改选其他后端。</p>
+        <button id="providerNoticeDismiss" type="button" class="ghost">知道了</button>
+      </section>
+
       <section class="card">
         <h2>1. 翻译后端</h2>
         <div class="row">
@@ -20,8 +25,7 @@
             <option value="gemini">Google Gemini</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic Claude</option>
-            <option value="google-translate">Google Translate v2 (NMT)</option>
-            <option value="google-translate-v3">Google Translate v3 (LLM / Advanced)</option>
+            <option value="google-translate">Google Translate（基础模式）</option>
             <option value="custom">自定义 (OpenAI 兼容)</option>
           </select>
         </div>
@@ -62,8 +66,9 @@
           </div>
         </div>
 
-        <!-- Google Translate v2 block: just an API Key -->
+        <!-- Google Translate block: just an API Key -->
         <div class="provider-block" id="v2Block" hidden>
+          <p class="hint">基础模式：Google Translate 只负责把句子译出来，不接受任何指令。它速度快、结果稳定，也不会把台词当成对话来回答；但「统一人名译法」「上下文行数」和回答不合格时的重问对它都不起作用。想要这些功能请改用 Gemini、OpenAI、Claude 或自定义模型。</p>
           <div class="row">
             <label>API Key</label>
             <div class="input-with-button">
@@ -75,49 +80,6 @@
             <small class="hint">
               Google Cloud Console → APIs &amp; Services → Credentials → Create credentials → API Key。
               确保已启用 Cloud Translation API。
-            </small>
-          </div>
-        </div>
-
-        <!-- Google Translate v3 block: completely separate from LLM settings -->
-        <div class="provider-block" id="v3Block" hidden>
-          <div class="subblock-heading">Google Translate v3 专属设置</div>
-          <div class="row">
-            <label>Service Account JSON</label>
-            <div class="input-with-button">
-              <textarea
-                id="saJson"
-                rows="6"
-                placeholder="粘贴完整的 .json 内容"
-              ></textarea>
-              <button id="toggleSaJson" type="button" class="ghost" title="显示/隐藏">
-                显示
-              </button>
-            </div>
-            <small class="hint">
-              v3 不支持 API Key（会报 401）。需要 Service Account：IAM &amp; Admin → Service Accounts
-              新建一个，授予 <code>Cloud Translation API User</code> 角色，Keys → Add Key →
-              Create new key → JSON，把下载的文件内容整个粘进来。扩展本地用 Web Crypto 签 JWT 换
-              access token，JSON 只存在 <code>chrome.storage.sync</code> 里。
-            </small>
-          </div>
-          <div class="row">
-            <label>Project ID</label>
-            <input id="googleProjectId" type="text" placeholder="留空则使用 SA JSON 里的 project_id" />
-          </div>
-          <div class="row">
-            <label>Location</label>
-            <input id="googleLocation" type="text" placeholder="us-central1" />
-            <small class="hint">
-              用 <code>translation-llm</code> 时必须是 <code>us-central1</code>；普通 NMT 可用 <code>global</code>。
-            </small>
-          </div>
-          <div class="row">
-            <label>模型</label>
-            <input id="modelV3" type="text" placeholder="general/translation-llm" />
-            <small class="hint">
-              默认 <code>general/translation-llm</code>（Gemini 驱动，质量最好）；也可填
-              <code>general/nmt</code>，或完整路径 <code>projects/…/models/…</code>。
             </small>
           </div>
         </div>

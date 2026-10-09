@@ -62,6 +62,15 @@ h1 {
   margin-bottom: 16px;
 }
 
+/* A one-off message above the settings, dismissed with its own button. */
+.card.notice {
+  border-color: var(--accent);
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.card.notice p { margin: 0; flex: 1; }
+
 .card h2 {
   font-size: 15px;
   margin: 0 0 14px;
@@ -113,11 +122,6 @@ textarea {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.5;
-}
-
-textarea.masked {
-  -webkit-text-security: disc;
-  text-security: disc;
 }
 
 input[type="number"] { max-width: 120px; }

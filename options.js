@@ -5,9 +5,7 @@ const MODEL_HINTS = {
   openai: "从上面的列表里选，或选「自定义」填写任意模型名。留空则使用后端默认。",
   anthropic: "从上面的列表里选，或选「自定义」填写任意模型名。留空则使用后端默认。",
   "google-translate":
-    "Google Translate v2 无需模型设置，此项可留空。Cloud Translation API v2，需要在 Google Cloud Console 开启 API 并创建 API Key。",
-  "google-translate-v3":
-    "默认 general/translation-llm（Gemini 驱动，质量最好）；填 general/nmt 则用传统 NMT。也可填完整资源路径 projects/PROJECT/locations/LOC/models/general/translation-llm 或自训 AutoML 模型。",
+    "Google Translate 无需模型设置，此项可留空。使用 Cloud Translation API v2，需要在 Google Cloud Console 开启 API 并创建 API Key。",
   custom: "选「自定义」填写你的目标模型名。Endpoint 必须是 OpenAI chat/completions 兼容。",
 };
 
@@ -75,8 +73,8 @@ async function load() {
   $("fontFamily").value = s.fontFamily || "";
   $("fontWeight").value = String(s.fontWeight ?? 400);
   $("fontSize").value = s.fontSize ?? 32;
-  $("googleProjectId").value = s.googleProjectId || "";
-  $("googleLocation").value = s.googleLocation || "us-central1";
+  // Shown until dismissed: the provider this user had selected is gone.
+  $("providerNotice").hidden = !s.removedProviderNotice;
   $("textBgEnabled").checked = s.textBgEnabled !== false;
   $("textBgOpacity").value = s.textBgOpacity ?? 35;
   applyProviderSwap();
@@ -491,13 +489,11 @@ function updateStylePreview() {
 function applyProviderSwap() {
   const p = $("provider").value;
   const isV2 = p === "google-translate";
-  const isV3 = p === "google-translate-v3";
-  const isLLM = !isV2 && !isV3;
+  const isLLM = !isV2;
 
-  // Show exactly one of the three blocks.
+  // Show exactly one of the two blocks.
   $("llmBlock").hidden = !isLLM;
   $("v2Block").hidden = !isV2;
-  $("v3Block").hidden = !isV3;
   $("customRow").hidden = p !== "custom";
   $("modelHint").textContent = MODEL_HINTS[p] || "";
 
@@ -506,8 +502,6 @@ function applyProviderSwap() {
   $("model").value = isLLM ? models[p] || "" : "";
   if (isLLM) renderModelPresets(p, models[p] || "");
   $("apiKeyV2").value = apiKeys["google-translate"] || "";
-  $("saJson").value = apiKeys["google-translate-v3"] || "";
-  $("modelV3").value = models["google-translate-v3"] || "";
 }
 
 function renderModelPresets(provider, stored) {
@@ -600,7 +594,7 @@ function bindLLMField(id, mapRef, mapName) {
     clearTimeout(timer);
     timer = setTimeout(() => {
       const p = $("provider").value;
-      if (p === "google-translate" || p === "google-translate-v3") return;
+      if (p === "google-translate") return;
       mapRef[p] = el.value;
       saveField(mapName, { ...mapRef });
     }, 300);
@@ -630,8 +624,6 @@ function bindFixedSlot(id, mapRef, mapName, slot) {
   });
 }
 bindFixedSlot("apiKeyV2", apiKeys, "apiKeys", "google-translate");
-bindFixedSlot("saJson", apiKeys, "apiKeys", "google-translate-v3");
-bindFixedSlot("modelV3", models, "models", "google-translate-v3");
 bindText("customEndpoint", "customEndpoint");
 bindText("temperature", "temperature", (v) => Number(v));
 bindText("targetLanguage", "targetLanguage");
@@ -643,8 +635,6 @@ bindCheckbox("debug", "debug");
 bindText("fontFamily", "fontFamily");
 bindSelect("fontWeight", "fontWeight", (v) => Number(v));
 bindText("fontSize", "fontSize", (v) => Number(v));
-bindText("googleProjectId", "googleProjectId");
-bindText("googleLocation", "googleLocation");
 bindCheckbox("textBgEnabled", "textBgEnabled");
 bindText("textBgOpacity", "textBgOpacity", (v) => Number(v));
 
@@ -742,21 +732,10 @@ $("skipLangCustom").addEventListener("keydown", (e) => {
   }
 });
 
-// Show/hide Service Account JSON (textarea uses a CSS mask class rather than
-// input type=password, which doesn't apply to <textarea>).
-$("toggleSaJson").addEventListener("click", () => {
-  const ta = $("saJson");
-  const btn = $("toggleSaJson");
-  if (ta.classList.contains("masked")) {
-    ta.classList.remove("masked");
-    btn.textContent = "隐藏";
-  } else {
-    ta.classList.add("masked");
-    btn.textContent = "显示";
-  }
+$("providerNoticeDismiss").addEventListener("click", async () => {
+  $("providerNotice").hidden = true;
+  await saveField("removedProviderNotice", "");
 });
-// Default: masked
-$("saJson").classList.add("masked");
 
 $("testBtn").addEventListener("click", async () => {
   const statusEl = $("testStatus");

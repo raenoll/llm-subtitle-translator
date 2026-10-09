@@ -1,13 +1,13 @@
 # LLM Subtitle Translator
 
-用 **Gemini / OpenAI / Claude / Google Translate** 的 API 实时翻译 **Netflix、Disney+、Prime Video、YouTube、HBO Max、Apple TV+、TVer** 等流媒体的内置字幕。
+用 **Gemini / OpenAI / Claude**（或 Google Translate 基础模式）的 API 实时翻译 **Netflix、Disney+、Prime Video、YouTube、HBO Max、Apple TV+、TVer** 等流媒体的内置字幕。
 
 ## 工作原理
 
 1. 内容脚本 (`content.js`) 注入到播放页面，每 200ms 轮询平台自身的字幕 DOM 节点。这里用轮询而不是 `MutationObserver`——多数播放器用 Shadow DOM 或 React 整块重建字幕节点，轮询更稳。
 2. 同时 `inject.js` 在页面自身的 MAIN world 里挂上 `fetch` / `XMLHttpRequest`，拦截播放器请求的字幕文件（WebVTT / TTML / YouTube timedtext）。拿到整段字幕后可以**提前批量翻译**，播到时直接命中缓存，没有等待。
 3. 字幕文本变化时，脚本把原文通过 `chrome.runtime.sendMessage` 发给 Service Worker。
-4. Service Worker (`background.js`) 调用你配置好的后端（Gemini / OpenAI / Anthropic / Google Translate v2 / v3 / 自定义 OpenAI 兼容 endpoint）返回翻译，并清洗掉模型偶尔吐出的转义字符、代码围栏、HTML 实体等非译文内容。
+4. Service Worker (`background.js`) 调用你配置好的后端（Gemini / OpenAI / Anthropic / 自定义 OpenAI 兼容 endpoint / Google Translate）返回翻译，并清洗掉模型偶尔吐出的转义字符、代码围栏、HTML 实体等非译文内容。
 5. 脚本把翻译后的文字叠在视频底部，并可选同时显示原文。
 6. 本地缓存 + 最近上下文窗口：重复的同一条字幕不会重复消费 token；最近几行翻译会作为上下文传给模型，保持称谓、语气连贯。
 7. 被识别为「不翻译的语言」的字幕直接放行显示原生字幕，不调用 API。
@@ -158,6 +158,24 @@
 - 只对 Gemini / OpenAI / Claude / 自定义这几类模型生效。Google Translate 不接受提示词，无法统一。
 - 依赖抓到的字幕文件。没抓到字幕文件、只能逐句现场翻译时，没有人名表可用。
 - 某个译名定得不好时，在设置页「已记住的译名」点「清空」，下次播放会重新定。目前不能单独修改某一个译名。
+
+## Google Translate（基础模式）
+
+Google Translate 只接受「要翻译的文本 + 目标语言」，没有地方写指令。它速度快、结果稳定，也不会像模型那样把台词当成对话来回答、
+原样返回原文或答成别的语言；但凡是靠提示词实现的功能，对它都不起作用：
+
+| 功能 | Gemini / OpenAI / Claude / 自定义 | Google Translate |
+|---|---|---|
+| 统一人名译法 | 有 | 没有 |
+| 回答不合格时换更严格的指令重问 | 有 | 没有，只判一次，不合格就留空 |
+| 上下文行数 | 有 | 没有 |
+| 字幕风格要求（译短一点、人名音译等） | 有 | 没有 |
+
+使用的是 Cloud Translation API v2，只需要一个 API Key。
+
+**Google Translate v3 已在 1.17.0 移除。** 它需要粘贴整份 Service Account JSON（含私钥），还要一套专门的签名换令牌代码，
+而它的卖点——Gemini 驱动的翻译模型——直接选 Gemini 就能用上全部功能。之前选了 v3 的，升级后会自动改用 Gemini，
+设置页顶部提示一次；保存过的 Service Account JSON、Project ID、Location 会从扩展的存储里删除。
 
 ## 运行日志 / 诊断
 
