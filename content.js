@@ -449,30 +449,104 @@
   document.addEventListener("webkitfullscreenchange", onFullscreenChange);
   document.addEventListener("mozfullscreenchange", onFullscreenChange);
 
-  // Keep the overlay aligned with the actual <video> element. In fullscreen
-  // the video fills the viewport, so viewport-based positioning happens to
-  // line up; in windowed mode the video is only part of the page and the
-  // overlay would otherwise stick to the page bottom.
+  // Where the video really shows, as opposed to where its element is. A player
+  // that crops or zooms the picture does it by making the <video> larger than
+  // its frame and clipping the excess, which leaves the element's bottom edge
+  // below the screen. Anchoring the overlay to that edge put the translation
+  // partly or wholly out of sight (reported on Netflix with wide-screen films,
+  // whose black bars are the usual thing to be cropped away).
+  //   shown   — the element's box cut down to what its clipping ancestors let
+  //             through: the picture as the player frames it
+  //   visible — `shown` cut down again to the viewport
+  const RECT_MIN = 100; // anything smaller is not a video we would subtitle
+
+  function intersectRects(a, b) {
+    return {
+      left: Math.max(a.left, b.left),
+      top: Math.max(a.top, b.top),
+      right: Math.min(a.right, b.right),
+      bottom: Math.min(a.bottom, b.bottom),
+    };
+  }
+
+  function rectIsUsable(r) {
+    return r.right - r.left >= RECT_MIN && r.bottom - r.top >= RECT_MIN;
+  }
+
+  function videoArea() {
+    const videos = getVideos();
+    const video =
+      videos.find((x) => !x.paused && x.readyState >= 2) || videos[0];
+    if (!video) return null;
+    const element = video.getBoundingClientRect();
+    let shown = element;
+    let pos = getComputedStyle(video).position;
+    // A fixed box answers to the viewport, not to its ancestors.
+    for (let el = video; pos !== "fixed"; ) {
+      el = el.assignedSlot || el.parentElement || el.getRootNode?.().host;
+      // <html> / <body> overflow belongs to the viewport, which is `visible`.
+      if (!el || el === document.body || el === document.documentElement) break;
+      const cs = getComputedStyle(el);
+      // A static, untransformed ancestor does not clip an absolutely
+      // positioned box: its containing block is further up.
+      if (
+        pos === "absolute" &&
+        cs.position === "static" &&
+        cs.transform === "none"
+      ) {
+        continue;
+      }
+      if (cs.overflowX !== "visible" || cs.overflowY !== "visible") {
+        // Ignore a clip that leaves next to nothing: that is a zero-height
+        // wrapper or similar, not the frame around the picture.
+        const cut = intersectRects(shown, el.getBoundingClientRect());
+        if (rectIsUsable(cut)) shown = cut;
+      }
+      pos = cs.position;
+    }
+    // Scrolled almost or entirely out of view: follow the video off-screen
+    // instead of pinning the subtitle over the rest of the page.
+    const cut = intersectRects(shown, {
+      left: 0,
+      top: 0,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+    });
+    return { video, element, shown, visible: rectIsUsable(cut) ? cut : shown };
+  }
+
+  // Keep the overlay aligned with the part of the <video> that is on screen.
+  // In windowed mode the video is only part of the page and the overlay would
+  // otherwise stick to the page bottom.
   function positionOverlayToVideo() {
     if (!overlay) return;
-    const videos = getVideos();
-    const v =
-      videos.find((x) => !x.paused && x.readyState >= 2) || videos[0];
-    if (!v) return;
-    const vr = v.getBoundingClientRect();
-    if (vr.width < 100 || vr.height < 100) return;
-    const centerX = vr.left + vr.width / 2;
-    // Position the overlay near the bottom of the video, inset ~8% of its
-    // height (matches the default 8vh look used in fullscreen).
-    const bottomOffset =
-      window.innerHeight - vr.bottom + Math.max(16, vr.height * 0.08);
+    const area = videoArea();
+    if (!area || !rectIsUsable(area.shown)) return;
+    const { shown, visible } = area;
+    const centerX = (visible.left + visible.right) / 2;
+    // Position the overlay near the bottom of the visible picture, inset ~8%
+    // of the picture's height (matches the default 8vh look used in
+    // fullscreen). The inset is taken from `shown` so it does not change
+    // while the page scrolls the video partly out of view.
+    const targetBottom =
+      visible.bottom - Math.max(16, (shown.bottom - shown.top) * 0.08);
+    let bottomOffset = window.innerHeight - targetBottom;
     overlay.style.setProperty("left", `${centerX}px`, "important");
     overlay.style.setProperty("bottom", `${bottomOffset}px`, "important");
     overlay.style.setProperty(
       "max-width",
-      `${Math.min(vr.width * 0.92, window.innerWidth * 0.92)}px`,
+      `${(visible.right - visible.left) * 0.92}px`,
       "important"
     );
+    // `bottom` counts from the viewport only while nothing above the overlay
+    // has become the containing block for fixed boxes (a transform on <html>
+    // does that). Rather than trust it, look at where the box landed and move
+    // it by the difference.
+    const r = overlay.getBoundingClientRect();
+    if (r.height > 0 && Math.abs(r.bottom - targetBottom) > 1) {
+      bottomOffset += r.bottom - targetBottom;
+      overlay.style.setProperty("bottom", `${bottomOffset}px`, "important");
+    }
   }
 
   // --- Translation line reflow ---------------------------------------------
@@ -594,13 +668,12 @@
     // Scale relative to the video's rendered height (reference: 1080p).
     // A user who sets 32px at 1080p gets ~64px on a 4K fullscreen and ~21px
     // on a 720p windowed player. Clamped so tiny thumbnails / absurdly large
-    // video walls don't produce unreadable extremes.
+    // video walls don't produce unreadable extremes. Measured on the picture
+    // as the player frames it — a cropped <video> is taller than what shows.
     let scale = 1;
-    const videos = getVideos();
-    const v =
-      videos.find((x) => !x.paused && x.readyState >= 2) || videos[0];
-    if (v) {
-      const h = v.getBoundingClientRect().height;
+    const area = videoArea();
+    if (area) {
+      const h = area.shown.bottom - area.shown.top;
       if (h > 0) scale = Math.max(0.5, Math.min(3.0, h / 1080));
     }
     const sz = baseSize * scale;
@@ -1813,6 +1886,24 @@
     renderOverlay();
   }
 
+  // Where things are on screen right now, each box as [left, top, width,
+  // height]. "The subtitle is cut off" cannot be diagnosed from text logs.
+  function layoutSnapshot() {
+    const area = videoArea();
+    const box = (r) =>
+      [r.left, r.top, r.right - r.left, r.bottom - r.top].map(Math.round);
+    const showing = overlay && overlay.style.display !== "none";
+    return {
+      viewport: [window.innerWidth, window.innerHeight],
+      fullscreen: !!fullscreenTarget(),
+      videos: getVideos().length,
+      frame: area ? [area.video.videoWidth, area.video.videoHeight] : null,
+      element: area ? box(area.element) : null,
+      visible: area ? box(area.visible) : null,
+      overlay: showing ? box(overlay.getBoundingClientRect()) : null,
+    };
+  }
+
   // The settings page reads the log and the timing stats from here, so the
   // whole diagnosis is available without opening DevTools.
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -1835,6 +1926,7 @@
       currentOriginal: (currentOriginal || "").slice(0, 60),
       currentTranslated: (currentTranslated || "").slice(0, 60),
       nativeCues: nativeCueStats(),
+      layout: layoutSnapshot(),
       showingNative: !!(currentOriginal && currentSkip),
       stats,
       withheldLines: [...failures.values()].filter((f) => f.attempts >= MAX_ROUNDS).length,

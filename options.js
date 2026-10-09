@@ -268,6 +268,42 @@ function summarize(d) {
         `）`
     );
   }
+  // Where the translation sits relative to what can be seen. Boxes are
+  // [left, top, width, height]. A box that pokes out goes FIRST, as above.
+  const lay = d.layout;
+  if (lay && lay.element) {
+    const size = (b) => `${b[2]}×${b[3]}`;
+    const el = lay.element;
+    const vis = lay.visible;
+    const ov = lay.overlay;
+    const cropped = el[2] > vis[2] + 1 || el[3] > vis[3] + 1;
+    if (
+      ov &&
+      (ov[0] < vis[0] - 1 ||
+        ov[1] < vis[1] - 1 ||
+        ov[0] + ov[2] > vis[0] + vis[2] + 1 ||
+        ov[1] + ov[3] > vis[1] + vis[3] + 1)
+    ) {
+      lines.unshift(
+        "❌ 译文框有一部分在可见画面之外，字幕会被截掉或完全看不到。" +
+          "反馈时请用「复制」带上这段诊断。"
+      );
+    }
+    lines.push(
+      `画面：窗口 ${lay.viewport[0]}×${lay.viewport[1]}` +
+        (lay.fullscreen ? "（全屏）" : "") +
+        ` · 片源 ${lay.frame[0]}×${lay.frame[1]}` +
+        ` · 视频元素 ${size(el)}，位于 (${el[0]}, ${el[1]})` +
+        (cropped
+          ? `，其中只有 ${size(vis)} 在可见范围内，译文按这部分定位`
+          : "") +
+        (lay.videos > 1 ? ` · 页面上共有 ${lay.videos} 个视频` : "") +
+        " · " +
+        (ov
+          ? `译文框 ${size(ov)}，底边距可见画面底部 ${vis[1] + vis[3] - ov[1] - ov[3]}px`
+          : "译文框当前未显示")
+    );
+  }
   lines.push(
     `平台 ${d.platform} · 字幕语种 ${d.sessionLanguage || "未确定"} · ` +
       `目标 ${d.targetLanguage}`
