@@ -1701,6 +1701,24 @@
         else if (prev !== lang) cueLangByKey.set(k, null);
       }
     }
+    // A file whose lines contradict the library over the same stretch of time
+    // is another title (or another subtitle track): the next episode on a page
+    // whose URL never changes. Keeping both would interleave two videos' lines.
+    // Segments of one file only ever repeat or extend each other.
+    if (cueList.length) {
+      const known = new Set(cueList.map((c) => compareKey(c.text)));
+      const lo = Math.min(...cues.map((c) => c.start));
+      const hi = Math.max(...cues.map((c) => c.end));
+      const overlapping = cueList.filter((c) => c.end > lo && c.start < hi);
+      const same = cues.filter((c) => known.has(compareKey(c.text))).length;
+      if (overlapping.length >= 3 && same * 5 < Math.min(cues.length, overlapping.length)) {
+        info(`captured subtitles belong to another video or track; ` +
+            `dropping the ${cueList.length} cues captured before`);
+        cueLibrary.clear();
+        cueList = [];
+        resetTimelineCalibration();
+      }
+    }
     let added = 0;
     for (const c of cues) {
       const key = `${c.start.toFixed(3)}|${c.end.toFixed(3)}|${c.text.slice(0, 32)}`;
@@ -1996,6 +2014,8 @@
     historyClock = null;
     earlyUnsupportedLogged = false;
     offsetVideoEl = null;
+    offsetVideoSrc = "";
+    timelineMisses.length = 0;
   }
 
   // Stick to one <video>. Picking "whichever is playing" afresh every tick
@@ -2003,19 +2023,66 @@
   // moment the main one buffers, and that element's clock selects a different
   // line — or none — so the overlay flickers until the main one resumes.
   let offsetVideoEl = null;
+  let offsetVideoSrc = "";
+
+  // Another title loaded into the player. Prime Video plays the next episode,
+  // or one picked from the same detail page, without changing the URL, so the
+  // URL check further down never fires and the previous title's cues stay in
+  // the library. The timeline must not drive the display off those: drop the
+  // calibration, which only locks again once lines on screen match the file.
+  function mediaChanged(why) {
+    domHistory.length = 0;
+    historyClock = null;
+    if (offsetLocked) info(`timeline released (${why}); waiting for lines on screen to match the file again`);
+    resetTimelineCalibration();
+    timelineMisses.length = 0;
+  }
 
   function playingVideo() {
-    if (offsetVideoEl && offsetVideoEl.isConnected && offsetVideoEl.readyState >= 1) {
-      return offsetVideoEl;
+    const keep =
+      offsetVideoEl &&
+      offsetVideoEl.isConnected &&
+      offsetVideoEl.readyState >= 1 &&
+      // A stopped element while another one plays: the player moved on.
+      !(offsetVideoEl.paused && getVideos().some((v) => v !== offsetVideoEl && !v.paused && v.readyState >= 2));
+    if (!keep) {
+      const videos = getVideos();
+      const area = (v) => v.clientWidth * v.clientHeight;
+      const playing = videos.filter((v) => !v.paused && v.readyState >= 2);
+      const pick = (playing.length ? playing : videos).sort((a, b) => area(b) - area(a))[0] || null;
+      if (pick !== offsetVideoEl) {
+        domHistory.length = 0; // another element, another clock
+        historyClock = null;
+      }
+      offsetVideoEl = pick;
     }
-    const videos = getVideos();
-    const area = (v) => v.clientWidth * v.clientHeight;
-    const playing = videos.filter((v) => !v.paused && v.readyState >= 2);
-    const pick = (playing.length ? playing : videos).sort((a, b) => area(b) - area(a))[0];
-    offsetVideoEl = pick || null;
-    if (offsetVideoEl) domHistory.length = 0; // another element, another clock
-    historyClock = null;
+    const src = offsetVideoEl?.currentSrc || "";
+    if (src && offsetVideoSrc && src !== offsetVideoSrc) mediaChanged("the player loaded new media");
+    if (src) offsetVideoSrc = src;
     return offsetVideoEl;
+  }
+
+  // The file in the library may not belong to what is playing — some players
+  // reuse the same media source for the next title. Lines the page shows that
+  // the file doesn't contain, several in a row with none that it does, mean
+  // the timeline is describing another video.
+  const timelineMisses = [];
+  let cueKeySetFor = null;
+  let cueKeySet = new Set();
+
+  function checkTimelineAgainstPage(domText) {
+    if (!offsetLocked || !domText) return;
+    if (cueKeySetFor !== cueList) {
+      cueKeySetFor = cueList;
+      cueKeySet = new Set(cueList.map((c) => compareKey(c.text)));
+    }
+    const key = compareKey(domText);
+    if (cueKeySet.has(key)) {
+      timelineMisses.length = 0;
+      return;
+    }
+    if (!timelineMisses.includes(key)) timelineMisses.push(key);
+    if (timelineMisses.length >= 3) mediaChanged("lines on screen are not in the captured file");
   }
 
   function recordDomLine(video, text) {
@@ -2093,6 +2160,7 @@
     // Recorded at every offset, 0 included, so a newly set delay takes effect
     // at once instead of first having to fill up.
     recordDomLine(video, domText);
+    checkTimelineAgainstPage(domText);
     // Same ±30 s limit as the popup and settings page, in case an older
     // build stored something larger.
     const offset = Math.max(-30, Math.min(30, Number(settings?.subtitleOffset) || 0));
