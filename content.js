@@ -1988,7 +1988,7 @@
   //     it can delay a line but never bring one forward.
   const domHistory = []; // { t: video time, text }, oldest first
   let historyClock = null; // last { video, wall } sample, for spotting seeks
-  const HISTORY_SECONDS = 15; // a little over the largest allowed offset (±10 s)
+  const HISTORY_SECONDS = 35; // a little over the largest allowed offset (±30 s)
   let earlyUnsupportedLogged = false;
 
   function resetSubtitleOffsetState() {
@@ -2053,9 +2053,9 @@
     // Recorded at every offset, 0 included, so a newly set delay takes effect
     // at once instead of first having to fill up.
     recordDomLine(video, domText);
-    // Same ±10 s limit as the popup and settings page, in case an older
+    // Same ±30 s limit as the popup and settings page, in case an older
     // build stored something larger.
-    const offset = Math.max(-10, Math.min(10, Number(settings?.subtitleOffset) || 0));
+    const offset = Math.max(-30, Math.min(30, Number(settings?.subtitleOffset) || 0));
     if (!offset) return domText;
     const target = video.currentTime - offset;
     const fromFile = lineFromTimeline(target);

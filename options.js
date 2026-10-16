@@ -605,7 +605,7 @@ bindText("contextLines", "contextLines", (v) => Number(v));
 // --- Subtitle offset ------------------------------------------------------
 // The popup and the settings page edit the same stored value, and each
 // follows the other's changes through storage. Seconds, 0.1 s steps.
-const OFFSET_LIMIT = 10;
+const OFFSET_LIMIT = 30;
 
 function normalizeOffset(v) {
   const n = Number(v);
