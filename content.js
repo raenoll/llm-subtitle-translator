@@ -1995,21 +1995,40 @@
     domHistory.length = 0;
     historyClock = null;
     earlyUnsupportedLogged = false;
+    offsetVideoEl = null;
   }
 
+  // Stick to one <video>. Picking "whichever is playing" afresh every tick
+  // jumps to another element (a preview, an ad, a blank placeholder) the
+  // moment the main one buffers, and that element's clock selects a different
+  // line — or none — so the overlay flickers until the main one resumes.
+  let offsetVideoEl = null;
+
   function playingVideo() {
+    if (offsetVideoEl && offsetVideoEl.isConnected && offsetVideoEl.readyState >= 1) {
+      return offsetVideoEl;
+    }
     const videos = getVideos();
-    return videos.find((v) => !v.paused && v.readyState >= 2) || videos[0] || null;
+    const area = (v) => v.clientWidth * v.clientHeight;
+    const playing = videos.filter((v) => !v.paused && v.readyState >= 2);
+    const pick = (playing.length ? playing : videos).sort((a, b) => area(b) - area(a))[0];
+    offsetVideoEl = pick || null;
+    if (offsetVideoEl) domHistory.length = 0; // another element, another clock
+    historyClock = null;
+    return offsetVideoEl;
   }
 
   function recordDomLine(video, text) {
     const t = video.currentTime;
     const wall = performance.now();
     // A seek makes the record useless: it describes another part of the video.
-    // Compare against where playback should have got to since the last tick.
+    // Only a jump counts — backwards, or further forwards than playback could
+    // have run since the last tick. Buffering merely stalls the clock, and
+    // clearing on that would blank the overlay for the whole delay.
     if (historyClock) {
-      const ran = video.paused ? 0 : ((wall - historyClock.wall) / 1000) * (video.playbackRate || 1);
-      if (Math.abs(t - (historyClock.video + ran)) > 1.5) domHistory.length = 0;
+      const ran = ((wall - historyClock.wall) / 1000) * (video.playbackRate || 1);
+      const moved = t - historyClock.video;
+      if (moved < -0.5 || moved > ran + 1.5) domHistory.length = 0;
     }
     historyClock = { video: t, wall };
     const last = domHistory[domHistory.length - 1];
@@ -2037,13 +2056,34 @@
     let lastEnd = -Infinity;
     for (const c of cueList) lastEnd = Math.max(lastEnd, c.end);
     if (ft < cueList[0].start - 5 || ft > lastEnd + 5) return null;
-    // Lines that overlap in the file are on screen together, as on the page.
-    const lines = [];
+    // Of the cues covering ft, only those that started last. Files often let
+    // one line run a few frames into the next; joining everything that
+    // overlaps produced a third, never-translated text for those frames, and
+    // the overlay blinked through it at every such boundary. Cues sharing a
+    // start time are one subtitle split across lines, so those are joined.
+    let latest = -Infinity;
     for (const c of cueList) {
       if (c.start > ft) break;
-      if (ft <= c.end && !lines.includes(c.text)) lines.push(c.text);
+      if (ft <= c.end) latest = Math.max(latest, c.start);
     }
-    return lines.join("\n");
+    if (latest === -Infinity) return "";
+    const parts = [];
+    for (const c of cueList) {
+      if (c.start > latest) break;
+      if (c.start === latest && ft <= c.end && !parts.includes(c.text)) parts.push(c.text);
+    }
+    const text = parts.join("\n");
+    // A split subtitle's parts were pre-translated one by one; put them
+    // together so the joined line shows at once instead of waiting on a
+    // live request.
+    if (parts.length > 1 && !cache.has(compareKey(text))) {
+      const done = parts.map((p) => cache.get(compareKey(p)));
+      if (done.every(Boolean)) {
+        cache.set(compareKey(text), done.join("\n"));
+        if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+      }
+    }
+    return text;
   }
 
   // The line the overlay should be showing now, given the page's own line.
