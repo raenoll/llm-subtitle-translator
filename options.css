@@ -126,6 +126,11 @@ textarea {
 
 input[type="number"] { max-width: 120px; }
 
+/* Subtitle offset: − [value] + 归零 */
+.offset { display: flex; align-items: center; gap: 6px; }
+.offset input[type="number"] { max-width: 90px; text-align: center; }
+.offset .step { min-width: 34px; font-size: 16px; line-height: 1; }
+
 button.primary {
   background: var(--accent);
   color: var(--accent-fg);

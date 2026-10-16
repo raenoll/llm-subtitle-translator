@@ -102,6 +102,17 @@
           <small class="hint">发送给模型的最近翻译行数，用于保持语气和代词一致。</small>
         </div>
         <div class="row">
+          <label>字幕偏移（秒）</label>
+          <!-- Same control as in popup.html; both write subtitleOffset. -->
+          <div class="offset">
+            <button type="button" class="ghost step" data-step="-0.1" title="提前 0.1 秒">−</button>
+            <input id="subtitleOffset" type="number" step="0.1" min="-60" max="60" />
+            <button type="button" class="ghost step" data-step="0.1" title="推迟 0.1 秒">+</button>
+            <button type="button" class="ghost" id="subtitleOffsetReset">归零</button>
+          </div>
+          <small class="hint">字幕时间轴不准时用来对齐声音。正数让译文<strong>更晚</strong>出现，负数让译文<strong>更早</strong>出现，每次调整 0.1 秒，和弹出窗口里的是同一个设置。提前显示要用到已经抓到的字幕文件；抓不到字幕文件的网站只能推迟，不能提前。</small>
+        </div>
+        <div class="row">
           <label>同时显示原文</label>
           <label class="switch">
             <input id="showOriginal" type="checkbox" />

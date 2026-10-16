@@ -48,6 +48,9 @@ const DEFAULT_SETTINGS = {
   // hard to read over bright scenes, so a faint black box is on by default.
   textBgEnabled: true,
   textBgOpacity: 35, // percent, 0-90
+  // Seconds the translated subtitle is moved against the video: positive shows
+  // it later, negative earlier. For titles whose subtitle timing is off.
+  subtitleOffset: 0,
 };
 
 // Hard deadline for every outbound request. Without one, a stalled provider

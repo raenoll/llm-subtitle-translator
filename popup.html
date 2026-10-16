@@ -39,6 +39,17 @@
     </section>
 
     <section class="row">
+      <label for="subtitleOffset">字幕偏移</label>
+      <!-- Same control as in options.html; both write subtitleOffset. -->
+      <div class="offset">
+        <button type="button" class="step" data-step="-0.1" title="提前 0.1 秒">−</button>
+        <input id="subtitleOffset" type="number" step="0.1" min="-60" max="60" />
+        <button type="button" class="step" data-step="0.1" title="推迟 0.1 秒">+</button>
+        <span class="unit">秒</span>
+      </div>
+    </section>
+
+    <section class="row">
       <label for="provider">后端</label>
       <!-- Keep these labels identical to the ones in options.html. -->
       <select id="provider">

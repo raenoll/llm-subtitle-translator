@@ -1977,6 +1977,96 @@
     return true;
   }
 
+  // -------------- subtitle offset --------------
+  // The user can move the translation against the video when a title's
+  // subtitle timing is off: positive shows it later, negative earlier. The
+  // native line is hidden anyway, so the overlay is free to run on its own
+  // clock. "The line at another moment" comes from one of two places:
+  //   - the captured subtitle file, once its clock is calibrated against the
+  //     video (see calibrateTimeline). Knows the future, so works both ways.
+  //   - a record of what the page itself showed when. Only knows the past, so
+  //     it can delay a line but never bring one forward.
+  const domHistory = []; // { t: video time, text }, oldest first
+  let historyClock = null; // last { video, wall } sample, for spotting seeks
+  const HISTORY_SECONDS = 70; // a little over the largest allowed offset
+  let earlyUnsupportedLogged = false;
+
+  function resetSubtitleOffsetState() {
+    domHistory.length = 0;
+    historyClock = null;
+    earlyUnsupportedLogged = false;
+  }
+
+  function playingVideo() {
+    const videos = getVideos();
+    return videos.find((v) => !v.paused && v.readyState >= 2) || videos[0] || null;
+  }
+
+  function recordDomLine(video, text) {
+    const t = video.currentTime;
+    const wall = performance.now();
+    // A seek makes the record useless: it describes another part of the video.
+    // Compare against where playback should have got to since the last tick.
+    if (historyClock) {
+      const ran = video.paused ? 0 : ((wall - historyClock.wall) / 1000) * (video.playbackRate || 1);
+      if (Math.abs(t - (historyClock.video + ran)) > 1.5) domHistory.length = 0;
+    }
+    historyClock = { video: t, wall };
+    const last = domHistory[domHistory.length - 1];
+    if (!last || last.text !== text) domHistory.push({ t, text });
+    while (domHistory.length > 1 && domHistory[1].t < t - HISTORY_SECONDS) domHistory.shift();
+  }
+
+  // What the page was showing at video time `target`: the last change at or
+  // before it. Nothing recorded that far back means nothing to show yet.
+  function lineFromHistory(target) {
+    let line = "";
+    for (const h of domHistory) {
+      if (h.t <= target) line = h.text;
+      else break;
+    }
+    return line;
+  }
+
+  // What the subtitle file has at video time `target`, "" for a gap between
+  // lines, or null when the file can't say: not calibrated yet, or `target`
+  // lies outside the stretch of the file captured so far.
+  function lineFromTimeline(target) {
+    if (!offsetLocked || !cueList.length) return null;
+    const ft = target - timelineOffset;
+    let lastEnd = -Infinity;
+    for (const c of cueList) lastEnd = Math.max(lastEnd, c.end);
+    if (ft < cueList[0].start - 5 || ft > lastEnd + 5) return null;
+    // Lines that overlap in the file are on screen together, as on the page.
+    const lines = [];
+    for (const c of cueList) {
+      if (c.start > ft) break;
+      if (ft <= c.end && !lines.includes(c.text)) lines.push(c.text);
+    }
+    return lines.join("\n");
+  }
+
+  // The line the overlay should be showing now, given the page's own line.
+  function lineToShow(domText) {
+    const video = playingVideo();
+    if (!video || !isFinite(video.currentTime)) return domText;
+    // Recorded at every offset, 0 included, so a newly set delay takes effect
+    // at once instead of first having to fill up.
+    recordDomLine(video, domText);
+    const offset = Number(settings?.subtitleOffset) || 0;
+    if (!offset) return domText;
+    const target = video.currentTime - offset;
+    const fromFile = lineFromTimeline(target);
+    if (fromFile !== null) return fromFile;
+    if (offset > 0) return lineFromHistory(target);
+    if (!earlyUnsupportedLogged) {
+      earlyUnsupportedLogged = true;
+      warn(`subtitle offset ${offset}s needs the subtitle file, which is not ` +
+          `captured or calibrated yet — showing lines at their own time until it is`);
+    }
+    return domText;
+  }
+
   // -------------- observer --------------
   let pollTimer = null;
   let diagTimer = null;
@@ -2001,6 +2091,7 @@
         `capturedCues=${cueList.length} preTranslated=${translatedCount} ` +
         `servedByTimeline=${timelineServed} servedLive=${domServed} ` +
         `timelineOffset=${offsetLocked ? timelineOffset.toFixed(2) + "s" : "未校准"} ` +
+        `subtitleOffset=${Number(settings?.subtitleOffset) || 0}s ` +
         `lastCapture=${lastCueCaptureAt ? `${Math.round((Date.now() - lastCueCaptureAt) / 1000)}s ago` : "never"} ` +
         `lastCue=${JSON.stringify(currentOriginal || "")}`
     );
@@ -2022,7 +2113,8 @@
       // Learn the offset between the file's timestamps and video.currentTime
       // from lines we can see, so the timeline path stops missing.
       calibrateTimeline(text);
-      handleCueChange(text);
+      // The user's subtitle offset picks which line that is; see lineToShow.
+      handleCueChange(lineToShow(text));
       // Re-assert hiding every tick. renderOverlay only runs on cue or
       // settings changes, and players re-create their subtitle nodes — and
       // sometimes the shadow root holding them — so a fresh root needs its own
@@ -2141,6 +2233,7 @@
       servedByTimeline: timelineServed,
       servedLive: domServed,
       timelineOffset: offsetLocked ? timelineOffset : null,
+      subtitleOffset: Number(settings?.subtitleOffset) || 0,
       currentOriginal: (currentOriginal || "").slice(0, 60),
       currentTranslated: (currentTranslated || "").slice(0, 60),
       nativeCues: nativeCueStats(),
@@ -2224,6 +2317,7 @@
     if (id !== lastVideoId) {
       lastVideoId = id;
       resetTimelineCalibration();
+      resetSubtitleOffsetState();
       currentOriginal = "";
       currentTranslated = "";
       lastLoggedText = null;

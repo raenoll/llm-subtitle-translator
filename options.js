@@ -65,6 +65,7 @@ async function load() {
   $("temperature").value = s.temperature ?? 0.2;
   $("targetLanguage").value = s.targetLanguage || "简体中文";
   $("contextLines").value = s.contextLines ?? 0;
+  showOffset(s.subtitleOffset ?? 0);
   $("showOriginal").checked = !!s.showOriginal;
   $("enabled").checked = !!s.enabled;
   $("debug").checked = !!s.debug;
@@ -601,6 +602,57 @@ bindText("customEndpoint", "customEndpoint");
 bindText("temperature", "temperature", (v) => Number(v));
 bindText("targetLanguage", "targetLanguage");
 bindText("contextLines", "contextLines", (v) => Number(v));
+// --- Subtitle offset ------------------------------------------------------
+// The popup and the settings page edit the same stored value, and each
+// follows the other's changes through storage. Seconds, 0.1 s steps.
+const OFFSET_LIMIT = 60;
+
+function normalizeOffset(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return 0;
+  const clamped = Math.max(-OFFSET_LIMIT, Math.min(OFFSET_LIMIT, n));
+  // Round to the step so repeated ±0.1 never drifts to 0.30000000000000004.
+  return Math.round(clamped * 10) / 10;
+}
+
+function showOffset(v) {
+  $("subtitleOffset").value = normalizeOffset(v).toFixed(1);
+}
+
+function saveOffset(v) {
+  const n = normalizeOffset(v);
+  showOffset(n);
+  return saveField("subtitleOffset", n);
+}
+
+let offsetTimer;
+$("subtitleOffset").addEventListener("input", (e) => {
+  clearTimeout(offsetTimer);
+  if (e.target.value === "" || e.target.value === "-") return; // still typing
+  offsetTimer = setTimeout(() => saveField("subtitleOffset", normalizeOffset(e.target.value)), 400);
+});
+$("subtitleOffset").addEventListener("change", (e) => {
+  clearTimeout(offsetTimer);
+  saveOffset(e.target.value);
+});
+document.querySelectorAll(".offset .step").forEach((b) => {
+  b.addEventListener("click", () => {
+    clearTimeout(offsetTimer);
+    const cur = normalizeOffset($("subtitleOffset").value);
+    saveOffset(cur + Number(b.dataset.step));
+  });
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "sync" || !("subtitleOffset" in changes)) return;
+  // Don't overwrite a number the user is in the middle of typing.
+  if (document.activeElement === $("subtitleOffset")) return;
+  showOffset(changes.subtitleOffset.newValue ?? 0);
+});
+$("subtitleOffsetReset").addEventListener("click", () => {
+  clearTimeout(offsetTimer);
+  saveOffset(0);
+});
+
 bindCheckbox("showOriginal", "showOriginal");
 bindCheckbox("enabled", "enabled");
 bindCheckbox("debug", "debug");
