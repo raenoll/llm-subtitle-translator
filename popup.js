@@ -52,7 +52,7 @@ $("provider").addEventListener("change", (e) =>
 // --- Subtitle offset ------------------------------------------------------
 // The popup and the settings page edit the same stored value, and each
 // follows the other's changes through storage. Seconds, 0.1 s steps.
-const OFFSET_LIMIT = 60;
+const OFFSET_LIMIT = 10;
 
 function normalizeOffset(v) {
   const n = Number(v);
