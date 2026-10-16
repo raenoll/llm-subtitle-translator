@@ -129,6 +129,11 @@ select {
 }
 .offset .step:hover { border-color: var(--accent); }
 .offset .unit { color: var(--muted); font-size: 12px; }
+/* The − / + buttons do the stepping; hide the browser's own spinner. */
+.offset input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.offset input[type="number"]::-webkit-inner-spin-button,
+.offset input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
 
 .status {
   margin: 12px 0 6px;
