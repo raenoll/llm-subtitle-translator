@@ -99,6 +99,42 @@ select {
 .switch input:checked + .slider::before { transform: translateX(18px); }
 .switch.small input:checked + .slider::before { transform: translateX(16px); }
 
+/* Subtitle offset: − [value] + 秒 */
+.offset {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.offset input {
+  width: 64px;
+  padding: 5px 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: center;
+}
+.offset .step {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.offset .step:hover { border-color: var(--accent); }
+.offset .unit { color: var(--muted); font-size: 12px; }
+/* The − / + buttons do the stepping; hide the browser's own spinner. */
+.offset input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.offset input[type="number"]::-webkit-inner-spin-button,
+.offset input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+
 .status {
   margin: 12px 0 6px;
   font-size: 12px;
