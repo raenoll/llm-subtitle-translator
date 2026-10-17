@@ -939,33 +939,38 @@
   let missingNativeFontLogged = false;
 
   // The platform sets the cue font on the innermost span, not the container
-  // the selectors match, so descend to the deepest node holding real text.
-  function deepestTextBearer(root) {
-    let best = null;
-    let bestDepth = -1;
-    const stack = [[root, 0]];
+  // the selectors match, so look at the nodes holding real text. Furigana
+  // must not count: <rt> renders at about half the base size, and some
+  // players draw the readings as their own smaller cue box above the line.
+  // Either way the readings are the smallest text on screen, so the line's
+  // size is the largest text-bearing size found, never the first or deepest.
+  function textBearers(root, out) {
+    const stack = [root];
     while (stack.length) {
-      const [node, depth] = stack.pop();
+      const node = stack.pop();
+      if (node.tagName === "RT" || node.tagName === "RP") continue;
       const hasDirectText = [...node.childNodes].some(
         (n) => n.nodeType === 3 && n.nodeValue.trim()
       );
-      if (hasDirectText && depth > bestDepth) {
-        best = node;
-        bestDepth = depth;
-      }
-      for (const child of node.children || []) stack.push([child, depth + 1]);
+      if (hasDirectText) out.push(node);
+      for (const child of node.children || []) stack.push(child);
     }
-    return best;
+    return out;
   }
 
   function readNativeFont() {
+    let next = null;
     for (const container of nativeCueElements()) {
-      const el = deepestTextBearer(container);
-      if (!el) continue;
-      const cs = getComputedStyle(el);
-      const size = parseFloat(cs.fontSize || "0");
-      if (!(size > 0)) continue;
-      const next = { fontFamily: cs.fontFamily || "", fontSize: size };
+      for (const el of textBearers(container, [])) {
+        const cs = getComputedStyle(el);
+        const size = parseFloat(cs.fontSize || "0");
+        if (!(size > 0)) continue;
+        if (!next || size > next.fontSize) {
+          next = { fontFamily: cs.fontFamily || "", fontSize: size };
+        }
+      }
+    }
+    if (next) {
       if (
         !nativeFont ||
         nativeFont.fontFamily !== next.fontFamily ||
